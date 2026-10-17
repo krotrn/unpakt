@@ -340,3 +340,92 @@ fn missing_input_is_not_found() {
         .unwrap_err();
     assert!(matches!(err, Error::NotFound(_)), "{err:?}");
 }
+
+#[test]
+fn install_never_runs_a_package_posing_as_a_helper() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let sys = tempfile::tempdir().unwrap();
+    let marker = src.path().join("marker");
+    let script = common::marker_script(&marker);
+    let tarball = build_tarball(
+        src.path(),
+        "posing-1.0.tar.gz",
+        Comp::Gz,
+        &[E::File("posing/bin/posing", &script, 0o755)],
+    );
+    let layout = Layout::under(root.path());
+    let path_var = std::env::join_paths([sys.path(), layout.bin.as_path()]).unwrap();
+    let mut engine = Engine::new(layout, Host::detect())
+        .unwrap()
+        .with_path_var(path_var);
+    let plan = engine
+        .inspect(
+            tarball.to_str().unwrap(),
+            AddOpts {
+                command: Some("update-desktop-database".into()),
+                ..AddOpts::default()
+            },
+        )
+        .unwrap();
+    engine.install(plan).unwrap();
+    assert!(!marker.exists(), "the installed package was executed");
+    let check = engine
+        .doctor()
+        .into_iter()
+        .find(|c| c.name == "update-desktop-database")
+        .unwrap();
+    assert!(!check.ok, "{}", check.detail);
+}
+
+#[test]
+fn install_rolls_back_when_db_write_fails() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = tool_tarball(src.path());
+    let mut engine = engine(root.path());
+    let baseline = tree_snapshot(root.path());
+
+    let lock = rusqlite::Connection::open(&engine.layout().db).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let plan = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    assert!(engine.install(plan).is_err());
+    assert_eq!(tree_snapshot(root.path()), baseline);
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert!(engine.list().unwrap().is_empty());
+}
+
+#[test]
+fn doctor_reports_problems() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = tool_tarball(src.path());
+    let mut engine = engine(root.path());
+    let plan = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    engine.install(plan).unwrap();
+    let id = "unpakt-fixture-tool";
+    let name = format!("app:{id}");
+    let find =
+        |engine: &Engine, n: &str| engine.doctor().into_iter().find(|c| c.name == n).unwrap();
+
+    assert!(find(&engine, "bin-in-path").ok);
+    assert!(find(&engine, &name).ok);
+    std::fs::remove_file(
+        engine
+            .layout()
+            .applications
+            .join(format!("unpakt-{id}.desktop")),
+    )
+    .unwrap();
+    assert!(!find(&engine, &name).ok);
+
+    let other = Layout::under(root.path());
+    let engine = Engine::new(other, Host::detect())
+        .unwrap()
+        .with_path_var(OsString::from("/usr/bin"));
+    assert!(!find(&engine, "bin-in-path").ok);
+}

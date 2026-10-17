@@ -78,11 +78,16 @@ fn sha256_prefix(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize())[..12].to_string())
 }
 
-fn find_in_path(program: &str, path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+/// Finds a system helper tool. Directories unpakt itself writes into (the bin
+/// dir) and anything resolving into the data dir are never trusted, so an
+/// installed package cannot masquerade as a helper.
+fn find_helper(program: &str, path_var: &std::ffi::OsStr, layout: &Layout) -> Option<PathBuf> {
+    let data = layout.data.canonicalize().unwrap_or(layout.data.clone());
     std::env::split_paths(path_var)
-        .filter(|d| !d.as_os_str().is_empty())
+        .filter(|d| !d.as_os_str().is_empty() && !same_dir(d, &layout.bin))
         .map(|d| d.join(program))
-        .find(|p| p.is_file())
+        .filter(|p| p.is_file())
+        .find(|p| p.canonicalize().is_ok_and(|c| !c.starts_with(&data)))
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -283,26 +288,23 @@ impl Engine {
             exec_kind: installed.kind,
             installed_at: now(),
         };
-        self.manifest
-            .commit_install(&app, &version, &integration.files)?;
-        if let Err(e) = self.persist_options(&id, &p.opts) {
-            let _ = self.manifest.remove(&id);
-            return Err(e);
+        let entry_opt = p
+            .opts
+            .entry
+            .as_ref()
+            .map(|e| e.to_string_lossy().into_owned());
+        let mut options: Vec<(&str, &str)> = Vec::new();
+        if let Some(entry) = &entry_opt {
+            options.push(("entry", entry));
         }
+        if let Some(pattern) = &p.opts.pattern {
+            options.push(("pattern", pattern));
+        }
+        self.manifest
+            .commit_install_with(&app, &version, &integration.files, &options)?;
         txn.commit();
         self.refresh_desktop_database();
         Ok(app)
-    }
-
-    fn persist_options(&mut self, id: &str, opts: &AddOpts) -> Result<()> {
-        if let Some(entry) = &opts.entry {
-            self.manifest
-                .set_option(id, "entry", &entry.to_string_lossy())?;
-        }
-        if let Some(pattern) = &opts.pattern {
-            self.manifest.set_option(id, "pattern", pattern)?;
-        }
-        Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<AppRecord>> {
@@ -358,7 +360,7 @@ impl Engine {
             },
         });
 
-        let udd = find_in_path(UPDATE_DESKTOP_DATABASE, &self.path_var);
+        let udd = find_helper(UPDATE_DESKTOP_DATABASE, &self.path_var, &self.layout);
         checks.push(Check {
             name: UPDATE_DESKTOP_DATABASE.into(),
             ok: udd.is_some(),
@@ -425,7 +427,7 @@ impl Engine {
     /// Asks the desktop to re-read launcher entries. Never runs anything from
     /// an installed package; failures are only logged.
     fn refresh_desktop_database(&self) {
-        let Some(tool) = find_in_path(UPDATE_DESKTOP_DATABASE, &self.path_var) else {
+        let Some(tool) = find_helper(UPDATE_DESKTOP_DATABASE, &self.path_var, &self.layout) else {
             return;
         };
         match Command::new(&tool)

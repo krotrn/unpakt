@@ -160,6 +160,11 @@ fn hostile_cases() -> Vec<Vec<E<'static>>> {
             E::Link("app/a", "d/b/.."),
             E::Link("app/d/b", ".."),
         ],
+        vec![
+            E::File("app/bin/app", ELF, 0o755),
+            E::Link("app/d", "bin"),
+            E::File("app/d/f", b"evil", 0o644),
+        ],
         vec![E::File("app/bin/app", ELF, 0o755), E::Hard("app/h", "../x")],
         vec![
             E::File("app/bin/app", ELF, 0o755),
@@ -225,4 +230,54 @@ fn failed_install_rolls_back() {
 
     assert!(!l.apps.join("tool").exists());
     assert_eq!(tree_snapshot(tmp.path()), before);
+}
+
+#[test]
+fn extract_skips_pax_global_header_with_strip_prefix() {
+    let src = tempfile::tempdir().unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    let comment = b"52 comment=0123456789abcdef0123456789abcdef01234567\n";
+    let mut header = tar::Header::new_ustar();
+    header.set_entry_type(tar::EntryType::XGlobalHeader);
+    header.as_old_mut().name[..17].copy_from_slice(b"pax_global_header");
+    header.set_size(comment.len() as u64);
+    header.set_mode(0o666);
+    header.set_cksum();
+    builder.append(&header, &comment[..]).unwrap();
+    let mut file = tar::Header::new_ustar();
+    file.set_entry_type(tar::EntryType::Regular);
+    file.as_old_mut().name[..11].copy_from_slice(b"app/bin/app");
+    file.set_size(ELF.len() as u64);
+    file.set_mode(0o755);
+    file.set_cksum();
+    builder.append(&file, ELF).unwrap();
+    let path = src.path().join("git.tar");
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+
+    let mut plan = plan_for(
+        build_tarball(
+            src.path(),
+            "g.tar",
+            Comp::None,
+            &[E::File("app/bin/app", ELF, 0o755)],
+        ),
+        "app",
+    );
+    assert_eq!(
+        plan.payload.strip_prefix.as_deref(),
+        Some(std::path::Path::new("app"))
+    );
+    plan.artifact.path = path;
+    let tmp = tempfile::tempdir().unwrap();
+    let l = layout(tmp.path());
+    let mut txn = Txn::new();
+    let done = for_payload(&plan.payload)
+        .unwrap()
+        .install(&plan, &l, &mut txn)
+        .unwrap();
+    txn.commit();
+    assert_eq!(
+        std::fs::read(done.version_dir.join("bin/app")).unwrap(),
+        ELF
+    );
 }

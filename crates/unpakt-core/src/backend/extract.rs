@@ -134,12 +134,31 @@ fn unpack(archive_path: &Path, staging: &Path, strip: Option<&Path>) -> Result<(
     let entries = archive.entries().at(archive_path)?;
     for entry in entries {
         let mut entry = entry.at(archive_path)?;
+        let kind = entry.header().entry_type();
+        if !matches!(
+            kind,
+            EntryType::Directory
+                | EntryType::Regular
+                | EntryType::Continuous
+                | EntryType::Symlink
+                | EntryType::Link
+        ) {
+            if !matches!(
+                kind,
+                EntryType::XGlobalHeader
+                    | EntryType::XHeader
+                    | EntryType::GNULongName
+                    | EntryType::GNULongLink
+            ) {
+                tracing::warn!(kind = ?kind, "skipping special archive entry");
+            }
+            continue;
+        }
         let raw = entry.path().at(archive_path)?.into_owned();
         let Some(rel) = destination(&raw, strip)? else {
             continue;
         };
         let dest = staging.join(&rel);
-        let kind = entry.header().entry_type();
         let mode = entry.header().mode().at(archive_path)? & 0o777;
 
         match kind {
@@ -196,9 +215,7 @@ fn unpack(archive_path: &Path, staging: &Path, strip: Option<&Path>) -> Result<(
                 remove_existing_file(&dest, &rel)?;
                 fs::hard_link(&source, &dest).at(&dest)?;
             }
-            other => {
-                tracing::warn!(path = %raw.display(), kind = ?other, "skipping special archive entry");
-            }
+            _ => unreachable!("other entry types were skipped above"),
         }
     }
     Ok(())

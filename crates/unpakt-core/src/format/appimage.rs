@@ -76,7 +76,7 @@ impl FormatPlugin for AppImage {
         }
         match read_contents(a, &file_name_app, file_version.clone()) {
             Ok(payload) => Ok(payload),
-            Err(Error::Io { path, source }) => Err(Error::Io { path, source }),
+            Err(e @ Error::Io { .. }) => Err(e),
             Err(e) => Ok(degraded(&e.to_string())),
         }
     }
@@ -168,7 +168,7 @@ fn read_text(fs: &FilesystemReader, node: &Node<SquashfsFileReader>) -> Result<S
         .reader()
         .take(MAX_DESKTOP_BYTES)
         .read_to_end(&mut buf)
-        .at(&node.fullpath)?;
+        .map_err(|e| Error::Parse(format!("reading {}: {e}", node.fullpath.display())))?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -207,7 +207,7 @@ fn find_icon(
             .reader()
             .take(MAX_ICON_BYTES)
             .read_to_end(&mut data)
-            .at(&node.fullpath)?;
+            .map_err(|e| Error::Parse(format!("reading {}: {e}", node.fullpath.display())))?;
         match sniff_icon_ext(&data) {
             Some(ext) => {
                 return Ok(Some(Icon {

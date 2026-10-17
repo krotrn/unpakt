@@ -322,3 +322,35 @@ fn type1_or_garbage_squashfs_degrades() {
         assert!(p.warnings[0].starts_with("could not read AppImage contents"));
     }
 }
+
+#[test]
+fn corrupt_data_block_degrades() {
+    let d = tempfile::tempdir().unwrap();
+    // Incompressible filler so the desktop file occupies real data blocks.
+    let mut state = 0x9e3779b9u32;
+    let filler: Vec<u8> = (0..60_000)
+        .map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            b'a' + ((state >> 24) % 26) as u8
+        })
+        .collect();
+    let mut desktop = b"[Desktop Entry]\nName=Tool\n#".to_vec();
+    desktop.extend_from_slice(&filler);
+    let path = build_appimage(
+        d.path(),
+        "Tool-1.0.AppImage",
+        &[E::File("app.desktop", &desktop, 0o644)],
+    );
+    let mut bytes = std::fs::read(&path).unwrap();
+    let start = unpakt_core::format::squashfs_offset(&bytes).unwrap() as usize + 96;
+    for b in &mut bytes[start..start + 20_000] {
+        *b = 0xff;
+    }
+    std::fs::write(&path, bytes).unwrap();
+
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.name, "Tool");
+    assert!(p.desktop.is_none() && p.icon.is_none());
+    assert_eq!(p.warnings.len(), 1);
+    assert!(p.warnings[0].starts_with("could not read AppImage contents"));
+}

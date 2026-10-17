@@ -144,7 +144,7 @@ impl FromStr for SourceKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceCfg {
     pub kind: SourceKind,
     pub location: String,

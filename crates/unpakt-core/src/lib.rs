@@ -9,7 +9,9 @@ pub mod manifest;
 pub mod model;
 pub mod naming;
 pub mod paths;
+pub mod select;
 pub mod txn;
+pub mod version;
 
 pub use error::{Error, Result};
 pub use paths::Layout;

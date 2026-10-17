@@ -72,6 +72,8 @@ pub enum E<'a> {
     File(&'a str, &'a [u8], u32),
     /// Path, link target.
     Link(&'a str, &'a str),
+    /// Path, hardlink target.
+    Hard(&'a str, &'a str),
 }
 
 /// Writes a tarball named `name` under `dir`. Entry names are stored verbatim,
@@ -81,6 +83,12 @@ pub fn build_tarball(dir: &Path, name: &str, comp: Comp, entries: &[E]) -> PathB
     for entry in entries {
         let mut header = tar::Header::new_gnu();
         let (path, data): (&str, &[u8]) = match entry {
+            E::Hard(path, target) => {
+                header.set_entry_type(tar::EntryType::Link);
+                header.set_mode(0o644);
+                header.as_old_mut().linkname[..target.len()].copy_from_slice(target.as_bytes());
+                (path, &[])
+            }
             E::File(path, data, mode) => {
                 header.set_entry_type(tar::EntryType::Regular);
                 header.set_mode(*mode);

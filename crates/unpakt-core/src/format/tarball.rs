@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -172,17 +173,47 @@ fn clean(path: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Resolves a symlink target lexically against the link's directory; the
-/// result must stay inside the archive root.
-fn check_symlink(entry: &Path, target: &Path) -> Result<()> {
-    let bad = || unsafe_path(format!("{} -> {}", entry.display(), target.display()));
-    let mut depth = entry.components().count().saturating_sub(1);
-    for c in target.components() {
-        match c {
-            Component::Normal(_) => depth += 1,
-            Component::CurDir => {}
-            Component::ParentDir => depth = depth.checked_sub(1).ok_or_else(bad)?,
-            Component::RootDir | Component::Prefix(_) => return Err(bad()),
+const MAX_LINK_HOPS: usize = 40;
+
+/// Checks every symlink against the whole archive, so entry order is
+/// irrelevant: no entry may sit below a symlink, and no link target may
+/// resolve (following other archive symlinks) above the root.
+fn check_links(links: &BTreeMap<PathBuf, PathBuf>, paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        if path.ancestors().skip(1).any(|a| links.contains_key(a)) {
+            return Err(unsafe_path(path.display()));
+        }
+    }
+    for (link, target) in links {
+        let bad = || unsafe_path(format!("{} -> {}", link.display(), target.display()));
+        let mut stack: Vec<OsString> = link
+            .parent()
+            .map(|p| p.components().map(|c| c.as_os_str().to_owned()).collect())
+            .unwrap_or_default();
+        let mut queue: VecDeque<Component> = target.components().collect();
+        let mut hops = 0;
+        while let Some(c) = queue.pop_front() {
+            match c {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    stack.pop().ok_or_else(bad)?;
+                }
+                Component::RootDir | Component::Prefix(_) => return Err(bad()),
+                Component::Normal(part) => {
+                    stack.push(part.to_owned());
+                    let here: PathBuf = stack.iter().collect();
+                    if let Some(next) = links.get(&here) {
+                        hops += 1;
+                        if hops > MAX_LINK_HOPS {
+                            return Err(bad());
+                        }
+                        stack.pop();
+                        for c in next.components().rev() {
+                            queue.push_front(c);
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -192,6 +223,7 @@ fn scan(path: &Path) -> Result<Vec<Record>> {
     let mut archive = open_tar(path)?;
     let bad_tar = |e: std::io::Error| Error::Parse(format!("invalid tar archive: {e}"));
     let mut records = Vec::new();
+    let mut links = BTreeMap::new();
     for entry in archive.entries().map_err(bad_tar)? {
         let mut entry = entry.map_err(bad_tar)?;
         let raw = entry.path().map_err(bad_tar)?.into_owned();
@@ -205,7 +237,7 @@ fn scan(path: &Path) -> Result<Vec<Record>> {
                     .map(|t| t.into_owned())
                     .ok_or_else(|| unsafe_path(format!("{} has no target", raw.display())))?;
                 if ty == EntryType::Symlink {
-                    check_symlink(&clean_path, &target)?;
+                    links.insert(clean_path.clone(), target);
                 } else {
                     clean(&target)?;
                 }
@@ -240,6 +272,8 @@ fn scan(path: &Path) -> Result<Vec<Record>> {
             kind,
         });
     }
+    let paths: Vec<PathBuf> = records.iter().map(|r| r.path.clone()).collect();
+    check_links(&links, &paths)?;
     Ok(records)
 }
 

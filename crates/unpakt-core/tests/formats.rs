@@ -176,6 +176,15 @@ fn tarball_with_traversal_is_refused() {
             E::File("app/bin/app", ELF, 0o755),
             E::Link("x", "../outside"),
         ],
+        vec![E::File("./../x", ELF, 0o755)],
+        vec![E::Link("a", "."), E::Link("a/l", "../x")],
+        vec![E::Link("d/b", ".."), E::Link("a", "d/b/..")],
+        vec![E::Link("a", "d/b/.."), E::Link("d/b", "..")],
+        vec![E::File("app/bin/app", ELF, 0o755), E::Hard("app/h", "../x")],
+        vec![
+            E::File("app/bin/app", ELF, 0o755),
+            E::Hard("app/h", "/etc/passwd"),
+        ],
     ];
     for (i, entries) in cases.iter().enumerate() {
         let path = build_tarball(tmp.path(), &format!("bad-{i}.tar.gz"), Comp::Gz, entries);

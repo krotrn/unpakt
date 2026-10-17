@@ -101,7 +101,7 @@ impl DesktopEntry {
             }],
         };
         entry.set("Type", "Application");
-        entry.set("Name", name);
+        entry.set("Name", &escape_string(name));
         entry.set("Terminal", "false");
         entry.set("Categories", "Utility;");
         entry
@@ -132,6 +132,9 @@ impl DesktopEntry {
     /// Sets `key` in the main group; `value` is the text as written in the file.
     /// A missing key is appended at the end of the group.
     pub fn set(&mut self, key: &str, value: &str) {
+        // A raw line break would split the line and let a value inject extra keys.
+        let value = value.replace(['\r', '\n'], " ");
+        let value = value.as_str();
         let group = self.main_group_mut();
         let pair = |newline: &str| Line::Pair {
             key: key.to_string(),
@@ -192,6 +195,21 @@ impl DesktopEntry {
         }
         out
     }
+}
+
+/// The Desktop Entry string escape for a value.
+fn escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 const QUOTE_TRIGGERS: &str = " \t\n\"'\\><~|&;$*?#()`";
@@ -338,6 +356,27 @@ Exec=foo %U\nDBusActivatable=true\n\n# actions\n[Desktop Action new]\nName=New\n
             entry.render(),
             "[Desktop Entry]\nType=Application\nName=Foo\nTerminal=false\nCategories=Utility;\n"
         );
+    }
+
+    #[test]
+    fn new_application_name_cannot_inject_keys() {
+        let entry = DesktopEntry::new_application("a\nExec=evil");
+        let out = entry.render();
+        let names: Vec<_> = out.lines().filter(|l| l.starts_with("Name=")).collect();
+        assert_eq!(names, vec![r"Name=a\nExec=evil"]);
+        assert_eq!(entry.get("Exec"), None);
+        assert!(!out.lines().any(|l| l.starts_with("Exec=")));
+    }
+
+    #[test]
+    fn set_never_writes_raw_line_breaks() {
+        let mut entry = DesktopEntry::new_application("Foo");
+        entry.set("Comment", "x\ny");
+        entry.set("Other", "p\r\nq");
+        let out = entry.render();
+        assert!(out.contains("Comment=x y\n"));
+        assert!(out.contains("Other=p  q\n"));
+        assert!(!out.contains('\r'));
     }
 
     #[test]

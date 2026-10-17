@@ -22,6 +22,8 @@ fn strip_tag(tag: &str) -> &str {
 }
 
 fn parse_semver(tag: &str) -> Option<semver::Version> {
+    // Build metadata is ignored when ordering, as in semver's own precedence rules.
+    let tag = tag.split_once('+').map_or(tag, |(head, _)| head);
     let core_end = tag.find(['-', '+']).unwrap_or(tag.len());
     let (core, suffix) = tag.split_at(core_end);
     let parts: Vec<&str> = core.split('.').collect();
@@ -93,5 +95,32 @@ mod tests {
         assert!(is_newer("1.0.0", "1.0.0-rc1"));
         assert!(is_newer("2024.10.01", "2024.9.30"));
         assert!(!is_newer("nightly", "nightly"));
+    }
+
+    #[test]
+    fn compare_is_antisymmetric_and_never_panics() {
+        let inputs = [
+            "",
+            "v",
+            "release-",
+            "1..2",
+            "99999999999999999999.0.0",
+            "1.0.0",
+            "1.0.0-rc1",
+            "1.0.0+build",
+            "nightly",
+            "2024.10.01",
+            "v1.10.0",
+        ];
+        for a in inputs {
+            for b in inputs {
+                assert_eq!(compare(a, b), compare(b, a).reverse(), "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn build_metadata_does_not_order_versions() {
+        assert_eq!(compare("1.0.0+build", "1.0.0"), Equal);
     }
 }

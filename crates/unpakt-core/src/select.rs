@@ -9,7 +9,7 @@ const TARBALL_SUFFIXES: [&str; 8] = [
 ];
 
 /// Checksum and signature companions, plus extensions of other platforms' installers.
-const REJECTED_SUFFIXES: [&str; 12] = [
+const REJECTED_SUFFIXES: [&str; 13] = [
     ".sha256",
     ".sha256sum",
     ".sha512",
@@ -22,6 +22,7 @@ const REJECTED_SUFFIXES: [&str; 12] = [
     ".dmg",
     ".apk",
     ".pkg.tar.zst",
+    ".pkg.tar.xz",
 ];
 
 const REJECTED_NAME_PARTS: [&str; 2] = ["sha256sums", "checksums"];
@@ -30,7 +31,32 @@ const OTHER_OS_TOKENS: [&str; 9] = [
     "windows", "win32", "win64", "darwin", "macos", "osx", "apple", "android", "freebsd",
 ];
 
-const OTHER_ARCH_TOKENS: [&str; 4] = ["i386", "i686", "armv7", "armhf"];
+const OTHER_ARCH_TOKENS: &[&str] = &[
+    "i386",
+    "i586",
+    "i686",
+    "x86",
+    "arm",
+    "armel",
+    "armhf",
+    "armv6",
+    "armv6l",
+    "armv7",
+    "armv7l",
+    "ppc",
+    "ppc64",
+    "ppc64le",
+    "powerpc",
+    "s390x",
+    "riscv64",
+    "loongarch64",
+    "mips",
+    "mipsel",
+    "mips64",
+    "mips64el",
+    "sparc",
+    "sparc64",
+];
 
 /// Scores an asset name for `host`, or returns `None` when the name must be rejected.
 /// Rejected names are checksums, other OSes or architectures, unrecognized formats,
@@ -116,9 +142,13 @@ fn tokens(lower: &str) -> Vec<String> {
 /// True when a token names an architecture other than the host's.
 fn has_foreign_arch(tokens: &[String], host_arch: &Arch) -> bool {
     let host_aliases = host_arch.aliases();
+    let host_name = match host_arch {
+        Arch::Other(name) => name.as_str(),
+        _ => "",
+    };
     tokens.iter().any(|t| {
         let t = t.as_str();
-        if host_aliases.contains(&t) {
+        if t == host_name || host_aliases.contains(&t) {
             return false;
         }
         [Arch::X86_64, Arch::Aarch64]
@@ -231,6 +261,24 @@ mod tests {
         ] {
             assert_eq!(score_asset(name, &host, None), None, "{name}");
         }
+    }
+
+    #[test]
+    fn foreign_arch_without_native_asset_is_not_found() {
+        let host = x86_host();
+        for name in [
+            "tool-linux-ppc64le.AppImage",
+            "tool-linux-s390x.tar.gz",
+            "tool-linux-x86.tar.gz",
+            "tool-riscv64.tar.gz",
+            "tool-armv7l.tar.gz",
+            "pkg-1.0-1-x86_64.pkg.tar.xz",
+        ] {
+            let list = assets(&[name]);
+            let result = choose(&list, &host, None);
+            assert!(matches!(result, Err(Error::NotFound(_))), "{name}");
+        }
+        assert_eq!(score_asset("tool-x86_64.tar.gz", &host, None), Some(60));
     }
 
     #[test]

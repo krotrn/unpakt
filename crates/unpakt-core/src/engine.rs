@@ -16,14 +16,45 @@ use crate::format::detect;
 use crate::host::Host;
 use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
-use crate::manifest::{AppRecord, FileRecord, Manifest, VersionRecord};
-use crate::model::{Artifact, FormatKind, SourceCfg, SourceKind};
+use crate::manifest::{AppRecord, FileKind, FileRecord, Manifest, VersionRecord};
+use crate::model::{Artifact, FormatKind, Icon, Release, SourceCfg, SourceKind};
 use crate::naming::{slug, version_label};
 use crate::select::choose;
-use crate::source::resolve;
+use crate::source::{for_kind, resolve};
+use crate::version::is_newer;
 use crate::{Layout, Txn};
 
 const UPDATE_DESKTOP_DATABASE: &str = "update-desktop-database";
+
+/// How many versions of one app stay on disk.
+pub const KEEP_VERSIONS: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateInfo {
+    pub id: String,
+    pub current: String,
+    pub latest: String,
+}
+
+/// Removes a per-operation download directory when dropped.
+struct DownloadGuard(Option<PathBuf>);
+
+impl DownloadGuard {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take()
+            && let Err(e) = std::fs::remove_dir_all(&dir)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("cannot remove download dir {}: {e}", dir.display());
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct AddOpts {
@@ -67,6 +98,49 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Whether `release` is newer than the installed `current` version of `app`.
+/// GitHub compares release tags; direct URLs compare their change markers.
+fn newer_release(
+    app: &AppRecord,
+    current: &VersionRecord,
+    release: &Release,
+) -> Option<UpdateInfo> {
+    let (shown_current, latest) = match app.source.kind {
+        SourceKind::Github => {
+            let tag = release.version.as_deref()?;
+            let installed = current
+                .marker
+                .as_deref()
+                .or(current.version.as_deref())
+                .unwrap_or(&current.label);
+            if !is_newer(tag, installed) {
+                return None;
+            }
+            (installed.to_string(), tag.to_string())
+        }
+        SourceKind::DirectUrl => {
+            let fresh = release.marker.as_deref()?;
+            let stored = current.marker.as_deref()?;
+            if fresh == stored {
+                return None;
+            }
+            (
+                current
+                    .version
+                    .clone()
+                    .unwrap_or_else(|| current.label.clone()),
+                release.version.clone().unwrap_or_else(|| fresh.to_string()),
+            )
+        }
+        SourceKind::LocalFile => return None,
+    };
+    Some(UpdateInfo {
+        id: app.id.clone(),
+        current: shown_current,
+        latest,
+    })
 }
 
 fn sha256_prefix(path: &Path) -> Result<String> {
@@ -152,7 +226,10 @@ impl Engine {
             .tempdir_in(&root)
             .at(&root)?
             .keep();
-        Ok(self.http.download(url, &dir)?.path)
+        let guard = DownloadGuard(Some(dir.clone()));
+        let path = self.http.download(url, &dir)?.path;
+        guard.keep();
+        Ok(path)
     }
 
     pub fn inspect(&self, input: &str, opts: AddOpts) -> Result<InstallPlan> {
@@ -169,6 +246,7 @@ impl Engine {
             SourceKind::LocalFile => PathBuf::from(&asset.url),
             _ => self.download_asset(&asset.url)?,
         };
+        let download = self.download_guard(&canonical);
         let file_name = canonical
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -252,6 +330,7 @@ impl Engine {
             label,
             entry,
         };
+        download.keep();
         Ok(InstallPlan {
             plan,
             source,
@@ -263,7 +342,25 @@ impl Engine {
         })
     }
 
+    /// A guard for the download directory holding `artifact`; inert for files
+    /// that were not downloaded by this engine.
+    fn download_guard(&self, artifact: &Path) -> DownloadGuard {
+        let root = self.layout.cache.join("downloads");
+        DownloadGuard(
+            artifact
+                .parent()
+                .filter(|dir| dir.parent() == Some(root.as_path()))
+                .map(Path::to_path_buf),
+        )
+    }
+
+    /// Drops a plan that will not be installed, deleting its download.
+    pub fn discard(&self, plan: InstallPlan) {
+        drop(self.download_guard(&plan.plan.artifact.path));
+    }
+
     pub fn install(&mut self, p: InstallPlan) -> Result<AppRecord> {
+        let _download = self.download_guard(&p.plan.artifact.path);
         let id = p.plan.id.clone();
         if self.manifest.get(&id)?.is_some() {
             return Err(Error::Conflict(format!(
@@ -336,6 +433,215 @@ impl Engine {
         txn.commit();
         self.refresh_desktop_database();
         Ok(app)
+    }
+
+    /// Apps with a newer release than the installed one. Local-file apps have
+    /// no origin to ask and are skipped.
+    pub fn check_updates(&self, id: Option<&str>) -> Result<Vec<UpdateInfo>> {
+        let apps = match id {
+            Some(id) => vec![self.get(id)?.0],
+            None => self.manifest.list()?,
+        };
+        let mut found = Vec::new();
+        for app in apps {
+            if app.source.kind == SourceKind::LocalFile {
+                continue;
+            }
+            match self.check_app_update(&app) {
+                Ok(Some(info)) => found.push(info),
+                Ok(None) => {}
+                Err(e) if id.is_none() => {
+                    tracing::warn!("{}: cannot check for updates: {e}", app.id)
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(found)
+    }
+
+    fn check_app_update(&self, app: &AppRecord) -> Result<Option<UpdateInfo>> {
+        let current = self.current_version(app)?;
+        let release = for_kind(app.source.kind).latest(&app.source, &self.http)?;
+        Ok(newer_release(app, &current, &release))
+    }
+
+    fn current_version(&self, app: &AppRecord) -> Result<VersionRecord> {
+        self.manifest
+            .versions(&app.id)?
+            .into_iter()
+            .find(|v| v.label == app.current)
+            .ok_or_else(|| Error::NotFound(format!("{} {}", app.id, app.current)))
+    }
+
+    /// Installs the latest release next to the current version and switches to
+    /// it. Returns the new label, or `None` when already up to date. Any
+    /// failure leaves the current version exactly as it was.
+    pub fn update(&mut self, id: &str) -> Result<Option<String>> {
+        let (app, versions, files) = self.get(id)?;
+        if app.source.kind == SourceKind::LocalFile {
+            return Err(Error::Unsupported(format!(
+                "{id} was installed from a local file and has no update source"
+            )));
+        }
+        let current = self.current_version(&app)?;
+        if app.source.kind == SourceKind::Github {
+            let release = for_kind(app.source.kind).latest(&app.source, &self.http)?;
+            if newer_release(&app, &current, &release).is_none() {
+                return Ok(None);
+            }
+        }
+
+        let entry = self.manifest.option(id, "entry")?.map(PathBuf::from);
+        let pattern = self
+            .manifest
+            .option(id, "pattern")?
+            .or_else(|| app.source.pattern.clone());
+        let opts = AddOpts {
+            id: Some(id.to_string()),
+            entry,
+            command: app.command.clone(),
+            desktop: Some(app.desktop),
+            no_bin: app.command.is_none(),
+            force: false,
+            pattern,
+        };
+        let p = self.inspect(&app.source.location, opts)?;
+        let _download = self.download_guard(&p.plan.artifact.path);
+        let label = p.plan.label.clone();
+        if versions.iter().any(|v| v.label == label) {
+            return Ok(None);
+        }
+        let backend = for_payload(&p.plan.payload)
+            .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
+
+        let mut txn = Txn::new();
+        let installed = backend.install(&p.plan, &self.layout, &mut txn)?;
+        let link = self.layout.apps.join(id).join("current");
+        txn.symlink_swap(Path::new(&label), &link)?;
+        let exec = link.join(&installed.entry);
+        let integration = integrate(
+            &self.layout,
+            &IntegrateReq {
+                id,
+                name: &p.plan.name,
+                exec: &exec,
+                kind: installed.kind,
+                desktop_src: p.plan.payload.desktop.as_deref(),
+                icon: p.plan.payload.icon.as_ref(),
+                want_desktop: app.desktop,
+                command: app.command.as_deref(),
+                force: false,
+                no_fuse_appimage: p.plan.payload.format == FormatKind::AppImage && !self.host.fuse2,
+                owned: &files,
+                path_var: &self.path_var,
+            },
+            &mut txn,
+        )?;
+        for warning in integration.warnings.iter().chain(&p.plan.payload.warnings) {
+            tracing::warn!("{id}: {warning}");
+        }
+
+        // `versions` is newest first; the new version takes the first slot.
+        let pruned: Vec<&VersionRecord> = versions
+            .iter()
+            .skip(KEEP_VERSIONS - 1)
+            .filter(|v| v.label != label)
+            .collect();
+        for v in &pruned {
+            let dir = self.layout.apps.join(id).join(&v.label);
+            if std::fs::symlink_metadata(&dir).is_ok() {
+                txn.remove_dir_all(&dir)?;
+            }
+        }
+
+        let record = AppRecord {
+            id: id.to_string(),
+            name: p.plan.name.clone(),
+            format: p.plan.payload.format,
+            backend: p.backend.to_string(),
+            source: app.source.clone(),
+            current: label.clone(),
+            desktop: app.desktop,
+            command: app.command.clone(),
+        };
+        let version = VersionRecord {
+            label: label.clone(),
+            version: p.plan.payload.version.clone(),
+            marker: p.marker.clone(),
+            entry: installed.entry,
+            exec_kind: installed.kind,
+            installed_at: now(),
+        };
+        self.manifest
+            .commit_install_with(&record, &version, &integration.files, &[])?;
+        for v in pruned {
+            self.manifest.delete_version(id, &v.label)?;
+        }
+        txn.commit();
+        self.refresh_desktop_database();
+        Ok(Some(label))
+    }
+
+    /// Makes the next-older installed version current again. Nothing is deleted.
+    pub fn rollback(&mut self, id: &str) -> Result<String> {
+        let (app, versions, files) = self.get(id)?;
+        let pos = versions
+            .iter()
+            .position(|v| v.label == app.current)
+            .ok_or_else(|| Error::NotFound(format!("{id} {}", app.current)))?;
+        let target = versions
+            .get(pos + 1)
+            .ok_or_else(|| Error::NotFound(format!("{id} has no older version to roll back to")))?;
+        let version_dir = self.layout.apps.join(id).join(&target.label);
+        if std::fs::symlink_metadata(&version_dir).is_err() {
+            return Err(Error::NotFound(format!(
+                "{} is missing on disk",
+                version_dir.display()
+            )));
+        }
+
+        // The launcher entry and icon stay as installed; only what they run changes.
+        let desktop_src = files
+            .iter()
+            .find(|f| f.kind == FileKind::Desktop)
+            .and_then(|f| std::fs::read_to_string(&f.path).ok());
+        let icon = files
+            .iter()
+            .find(|f| f.kind == FileKind::Icon)
+            .and_then(|f| {
+                Some(Icon {
+                    ext: f.path.extension()?.to_string_lossy().into_owned(),
+                    data: std::fs::read(&f.path).ok()?,
+                })
+            });
+
+        let mut txn = Txn::new();
+        let link = self.layout.apps.join(id).join("current");
+        txn.symlink_swap(Path::new(&target.label), &link)?;
+        let exec = link.join(&target.entry);
+        let integration = integrate(
+            &self.layout,
+            &IntegrateReq {
+                id,
+                name: &app.name,
+                exec: &exec,
+                kind: target.exec_kind,
+                desktop_src: desktop_src.as_deref(),
+                icon: icon.as_ref(),
+                want_desktop: app.desktop,
+                command: app.command.as_deref(),
+                force: false,
+                no_fuse_appimage: app.format == FormatKind::AppImage && !self.host.fuse2,
+                owned: &files,
+                path_var: &self.path_var,
+            },
+            &mut txn,
+        )?;
+        self.manifest
+            .set_current(id, &target.label, &integration.files)?;
+        txn.commit();
+        self.refresh_desktop_database();
+        Ok(target.label.clone())
     }
 
     pub fn list(&self) -> Result<Vec<AppRecord>> {

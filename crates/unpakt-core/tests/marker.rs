@@ -1,11 +1,12 @@
 mod common;
 
-use common::{Comp, E, build_appimage, build_tarball, marker_script};
+use common::{Comp, E, MockForge, build_appimage, build_tarball, marker_script};
 use std::ffi::OsString;
 use unpakt_core::Layout;
 use unpakt_core::engine::{AddOpts, Engine};
 use unpakt_core::format::detect;
 use unpakt_core::host::Host;
+use unpakt_core::http::Http;
 use unpakt_core::model::Artifact;
 
 #[test]
@@ -82,4 +83,38 @@ fn install_never_executes_input() {
             path.display()
         );
     }
+}
+
+#[test]
+fn update_never_executes_input() {
+    let forge = MockForge::start();
+    let d = tempfile::tempdir().unwrap();
+    let marker = d.path().join("marker");
+    let script = marker_script(&marker);
+
+    let publish = |version: &str| {
+        let name = format!("Unpakt-Fixture-Marker-{version}.AppImage");
+        let image = build_appimage(d.path(), &name, &[E::File("AppRun", &script, 0o755)]);
+        forge.publish(version, vec![(name, std::fs::read(image).unwrap())]);
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let layout = Layout::under(root.path());
+    let bin = OsString::from(&layout.bin);
+    let mut engine = Engine::new(layout, Host::detect())
+        .unwrap()
+        .with_path_var(bin)
+        .with_http(Http::new(&forge.api_url(), None).unwrap());
+
+    publish("1.0.0");
+    let plan = engine
+        .inspect("https://github.com/o/r", AddOpts::default())
+        .unwrap();
+    let id = plan.plan.id.clone();
+    engine.install(plan).unwrap();
+
+    publish("2.0.0");
+    assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+    assert_eq!(engine.rollback(&id).unwrap(), "1.0.0");
+    assert!(!marker.exists(), "updating ran its input");
 }

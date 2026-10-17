@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 use unpakt_core::Error;
 use unpakt_core::engine::{AddOpts, Engine};
+use unpakt_core::model::SourceKind;
 
 const EXIT_ERROR: u8 = 1;
 const EXIT_REFUSED: u8 = 2;
@@ -28,7 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install a package file
+    /// Install a package file, a direct download URL or a GitHub repo
     Add {
         input: String,
         /// Install without asking for confirmation
@@ -69,6 +70,19 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Update apps to their latest release
+    Update {
+        /// App to update; all apps when omitted
+        id: Option<String>,
+        /// Only list available updates
+        #[arg(long)]
+        check: bool,
+        /// Accepted for scripts; updates never ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Switch an app back to its previous version
+    Rollback { id: String },
     /// Check the installation for problems
     Doctor,
 }
@@ -148,14 +162,17 @@ fn run(command: Command) -> Result<()> {
             };
             let plan = engine.inspect(&input, opts)?;
             output::print_summary(&plan);
-            if !yes {
-                confirm("install", "Install?")?;
+            if !yes && let Err(e) = confirm("install", "Install?") {
+                engine.discard(plan);
+                return Err(e);
             }
             let app = engine.install(plan)?;
             println!("installed {} {}", app.id, app.current);
         }
         Command::Inspect { input } => {
-            output::print_summary(&engine.inspect(&input, AddOpts::default())?);
+            let plan = engine.inspect(&input, AddOpts::default())?;
+            output::print_summary(&plan);
+            engine.discard(plan);
         }
         Command::List => output::print_list(&engine.list()?),
         Command::Info { id } => {
@@ -170,9 +187,58 @@ fn run(command: Command) -> Result<()> {
             engine.remove(&id)?;
             println!("removed {id}");
         }
+        Command::Update { id, check, yes: _ } => {
+            if check {
+                output::print_updates(&engine.check_updates(id.as_deref())?);
+            } else {
+                update_apps(&mut engine, id.as_deref())?;
+            }
+        }
+        Command::Rollback { id } => {
+            let label = engine.rollback(&id)?;
+            println!("{id}: rolled back to {label}");
+        }
         Command::Doctor => output::print_checks(&engine.doctor()),
     }
     Ok(())
+}
+
+/// Updates one app, or every app that has an update. One app failing does not
+/// stop the others; the run still fails.
+fn update_apps(engine: &mut Engine, id: Option<&str>) -> Result<()> {
+    if let Some(id) = id {
+        let old = engine.get(id)?.0.current;
+        report_update(id, &old, engine.update(id)?);
+        return Ok(());
+    }
+    let available = engine.check_updates(None)?;
+    let mut failed = 0;
+    for app in engine.list()? {
+        let Some(info) = available.iter().find(|u| u.id == app.id) else {
+            if app.source.kind != SourceKind::LocalFile {
+                println!("{}: up to date", app.id);
+            }
+            continue;
+        };
+        match engine.update(&app.id) {
+            Ok(new) => report_update(&app.id, &info.current, new),
+            Err(e) => {
+                eprintln!("error: {}: {e:#}", app.id);
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} update(s) failed");
+    }
+    Ok(())
+}
+
+fn report_update(id: &str, old: &str, new: Option<String>) {
+    match new {
+        Some(new) => println!("{id}: {old} -> {new}"),
+        None => println!("{id}: up to date"),
+    }
 }
 
 fn exit_code(err: &anyhow::Error) -> u8 {

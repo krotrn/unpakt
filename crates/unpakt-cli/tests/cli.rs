@@ -108,3 +108,42 @@ fn doctor_reports_checks_and_exits_zero() {
     assert_eq!(out.status.code(), Some(0));
     assert!(stdout(&out).contains("bin-in-path"), "{}", stdout(&out));
 }
+
+#[test]
+fn rollback_without_older_version_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let out = run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let list = stdout(&run(tmp.path(), &["list"]));
+    let id = list.split_whitespace().next().unwrap();
+    let label = list.split_whitespace().nth(1).unwrap();
+
+    let out = run(tmp.path(), &["rollback", id]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(stderr(&out).starts_with("error: "), "{}", stderr(&out));
+    let info = stdout(&run(tmp.path(), &["info", id]));
+    assert!(info.contains(&format!("current: {label}")), "{info}");
+}
+
+#[test]
+fn update_of_local_file_app_is_reported_not_attempted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    let id = stdout(&run(tmp.path(), &["list"]))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+
+    let all = run(tmp.path(), &["update", "--check"]);
+    assert_eq!(all.status.code(), Some(0), "{}", stderr(&all));
+    assert_eq!(stdout(&all), "");
+    let all = run(tmp.path(), &["update"]);
+    assert_eq!(all.status.code(), Some(0), "{}", stderr(&all));
+
+    let one = run(tmp.path(), &["update", &id]);
+    assert_eq!(one.status.code(), Some(1));
+    assert!(stderr(&one).contains("local file"), "{}", stderr(&one));
+}

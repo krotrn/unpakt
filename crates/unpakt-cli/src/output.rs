@@ -1,4 +1,4 @@
-use unpakt_core::engine::{Check, InstallPlan};
+use unpakt_core::engine::{Check, InstallPlan, UpdateInfo};
 use unpakt_core::manifest::{AppRecord, FileRecord, VersionRecord};
 
 const RUNNER_UPS: usize = 3;
@@ -61,5 +61,11 @@ pub fn print_checks(checks: &[Check]) {
     for c in checks {
         let mark = if c.ok { "[ok]" } else { "[!!]" };
         println!("{mark} {}: {}", c.name, c.detail);
+    }
+}
+
+pub fn print_updates(updates: &[UpdateInfo]) {
+    for u in updates {
+        println!("{}  {}  ->  {}", u.id, u.current, u.latest);
     }
 }

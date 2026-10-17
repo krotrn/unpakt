@@ -243,11 +243,10 @@ pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<I
     Ok(Integration { files, warnings })
 }
 
-fn dir_is_empty(dir: &Path) -> bool {
+/// A dir is empty when everything left in it is a path `txn` set aside itself.
+fn dir_is_empty(dir: &Path, txn: &Txn) -> bool {
     match fs::read_dir(dir) {
-        Ok(entries) => entries
-            .flatten()
-            .all(|e| e.file_name().to_string_lossy().starts_with(".unpakt-")),
+        Ok(entries) => entries.flatten().all(|e| txn.owns(&e.path())),
         Err(_) => false,
     }
 }
@@ -261,7 +260,7 @@ fn prune_icon_dirs(icon: &Path, txn: &mut Txn) -> Result<()> {
     let Some(stop) = dir.parent().and_then(Path::parent).map(Path::to_path_buf) else {
         return Ok(());
     };
-    while dir != stop && dir.starts_with(&stop) && dir_is_empty(&dir) {
+    while dir != stop && dir.starts_with(&stop) && dir_is_empty(&dir, txn) {
         txn.remove_dir_all(&dir)?;
         if !dir.pop() {
             break;

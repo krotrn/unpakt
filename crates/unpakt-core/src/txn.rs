@@ -198,12 +198,21 @@ impl Txn {
         Ok(())
     }
 
+    /// Whether `p` is a backup, trash or temp path this transaction created and still tracks.
+    pub fn owns(&self, p: &Path) -> bool {
+        self.log.iter().any(|u| match u {
+            Undo::Restore { backup, .. } => backup == p,
+            _ => false,
+        })
+    }
+
     /// Keeps all changes and discards backups.
     pub fn commit(mut self) {
         self.committed = true;
         for entry in std::mem::take(&mut self.log) {
             if let Undo::Restore { backup, .. } = entry
                 && let Err(e) = remove_any(&backup)
+                && e.kind() != std::io::ErrorKind::NotFound
             {
                 tracing::error!("cannot purge {}: {e}", backup.display());
             }

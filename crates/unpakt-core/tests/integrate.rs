@@ -365,3 +365,61 @@ fn disintegrate_keeps_dirs_with_other_content() {
     txn.commit();
     assert!(other.is_file());
 }
+
+#[test]
+fn disintegrate_keeps_dir_with_user_unpakt_file() {
+    let (_dir, layout, exec) = setup();
+    let pv = OsString::from(&layout.bin);
+    let icon = png(48);
+    let mut r = req(&exec, &pv);
+    r.icon = Some(&icon);
+    let mut txn = Txn::new();
+    let out = integrate(&layout, &r, &mut txn).unwrap();
+    txn.commit();
+    let user = layout.icons.join("48x48/apps/.unpakt-bak-user");
+    fs::write(&user, "u").unwrap();
+    let mut txn = Txn::new();
+    disintegrate(&out.files, &mut txn).unwrap();
+    txn.commit();
+    assert!(user.is_file());
+}
+
+struct ErrorCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl tracing::Subscriber for ErrorCounter {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::ERROR {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[test]
+fn commit_after_pruning_logs_no_errors() {
+    let (_dir, layout, exec) = setup();
+    let pv = OsString::from(&layout.bin);
+    let icon = png(48);
+    let mut r = req(&exec, &pv);
+    r.icon = Some(&icon);
+    let mut txn = Txn::new();
+    let out = integrate(&layout, &r, &mut txn).unwrap();
+    txn.commit();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    tracing::subscriber::with_default(ErrorCounter(count.clone()), || {
+        let mut txn = Txn::new();
+        disintegrate(&out.files, &mut txn).unwrap();
+        txn.commit();
+    });
+    assert!(!layout.icons.join("48x48").exists());
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

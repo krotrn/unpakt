@@ -139,3 +139,29 @@ fn write_over_existing_replaces_and_rolls_back_content_and_mode() {
     );
     assert_eq!(tree_snapshot(tmp.path()), before);
 }
+
+#[test]
+fn owns_only_tracked_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("f");
+    fs::write(&f, "old").unwrap();
+    let stray = dir.path().join(".unpakt-bak-x");
+    fs::write(&stray, "user").unwrap();
+    let mut t = Txn::new();
+    t.write(&f, b"new", 0o644).unwrap();
+    let backup = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p != &f
+                && p != &stray
+                && p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".unpakt-bak-")
+        })
+        .unwrap();
+    assert!(t.owns(&backup));
+    assert!(!t.owns(&stray));
+    assert!(!t.owns(&f));
+}

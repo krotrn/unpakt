@@ -132,3 +132,47 @@ pub fn build_tarball(dir: &Path, name: &str, comp: Comp, entries: &[E]) -> PathB
     std::fs::write(&path, bytes).unwrap();
     path
 }
+
+/// A shell script that creates `marker` when run.
+pub fn marker_script(marker: &Path) -> Vec<u8> {
+    format!("#!/bin/sh\ntouch '{}'\n", marker.display()).into_bytes()
+}
+
+/// Writes a type 2 AppImage named `name` under `dir`: a real ELF header, the
+/// `AI\x02` magic, and a gzip squashfs holding `files` right after the ELF.
+/// Only `E::File` and `E::Link` entries are supported.
+pub fn build_appimage(dir: &Path, name: &str, files: &[E]) -> PathBuf {
+    use backhand::{FilesystemWriter, NodeHeader};
+
+    let mut image = std::fs::read("/usr/bin/true").unwrap();
+    let offset = unpakt_core::format::squashfs_offset(&image).unwrap() as usize;
+    image.resize(offset, 0);
+    image[8..11].copy_from_slice(b"AI\x02");
+
+    let mut writer = FilesystemWriter::default();
+    writer.set_compressor(
+        backhand::FilesystemCompressor::new(backhand::compression::Compressor::Gzip, None).unwrap(),
+    );
+    for entry in files {
+        match entry {
+            E::File(path, data, mode) => writer
+                .push_file(
+                    std::io::Cursor::new(data.to_vec()),
+                    path,
+                    NodeHeader::new(*mode as u16, 0, 0, 0),
+                )
+                .unwrap(),
+            E::Link(path, target) => writer
+                .push_symlink(target, path, NodeHeader::new(0o777, 0, 0, 0))
+                .unwrap(),
+            E::Hard(..) => panic!("hard links are not supported in AppImage fixtures"),
+        }
+    }
+    let mut squashfs = std::io::Cursor::new(Vec::new());
+    writer.write(&mut squashfs).unwrap();
+    image.extend_from_slice(&squashfs.into_inner());
+
+    let path = dir.join(name);
+    std::fs::write(&path, image).unwrap();
+    path
+}

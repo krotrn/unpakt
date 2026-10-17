@@ -1,6 +1,6 @@
 mod common;
 
-use common::{Comp, E, build_tarball};
+use common::{Comp, E, build_appimage, build_tarball};
 use std::path::Path;
 use unpakt_core::Error;
 use unpakt_core::format::detect;
@@ -234,5 +234,91 @@ fn names_unsupported_formats() {
     match detect(&artifact(&path)) {
         Err(Error::Unsupported(m)) => assert!(m.contains("unknown format")),
         other => panic!("{:?}", other.map(|p| p.kind())),
+    }
+}
+
+#[test]
+fn appimage_desktop_and_symlinked_icon() {
+    let d = tempfile::tempdir().unwrap();
+    let path = build_appimage(
+        d.path(),
+        "Obsidian-1.6.7.AppImage",
+        &[
+            E::File(
+                "app.desktop",
+                b"[Desktop Entry]\nType=Application\nName=Obsidian\nIcon=obsidian\nExec=AppRun\n",
+                0o644,
+            ),
+            E::File("obsidian.png", PNG, 0o644),
+            E::Link(".DirIcon", "obsidian.png"),
+            E::File("AppRun", b"#!/bin/sh\n", 0o755),
+        ],
+    );
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.format, FormatKind::AppImage);
+    assert_eq!(
+        (p.name.as_str(), p.version.as_deref()),
+        ("Obsidian", Some("1.6.7"))
+    );
+    assert!(p.desktop.unwrap().contains("Name=Obsidian"));
+    let icon = p.icon.unwrap();
+    assert_eq!(icon.ext, "png");
+    assert_eq!(icon.data, PNG);
+    assert!(p.warnings.is_empty());
+}
+
+#[test]
+fn appimage_icon_symlink_leaving_image_is_dropped_with_warning() {
+    let d = tempfile::tempdir().unwrap();
+    let path = build_appimage(
+        d.path(),
+        "Tool-1.0.AppImage",
+        &[
+            E::File(
+                "tool.desktop",
+                b"[Desktop Entry]\nName=Tool\nIcon=tool\n",
+                0o644,
+            ),
+            E::Link(".DirIcon", "../../etc/passwd"),
+        ],
+    );
+    let p = inspect(&path).unwrap();
+    assert!(p.icon.is_none());
+    assert_eq!(p.warnings.len(), 1);
+}
+
+#[test]
+fn appimage_version_prefers_desktop_key() {
+    let d = tempfile::tempdir().unwrap();
+    let path = build_appimage(
+        d.path(),
+        "Tool.AppImage",
+        &[E::File(
+            "tool.desktop",
+            b"[Desktop Entry]\nName=Tool\nX-AppImage-Version=2.3.4\n",
+            0o644,
+        )],
+    );
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.version.as_deref(), Some("2.3.4"));
+}
+
+#[test]
+fn type1_or_garbage_squashfs_degrades() {
+    let d = tempfile::tempdir().unwrap();
+    for (name, magic) in [
+        ("Foo-1.2.AppImage", b"AI\x01"),
+        ("Bar-3.4.AppImage", b"AI\x02"),
+    ] {
+        let mut bytes = ELF.to_vec();
+        bytes.resize(4096, 0x5a);
+        bytes[8..11].copy_from_slice(magic);
+        let path = d.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let p = inspect(&path).unwrap();
+        assert_eq!(p.format, FormatKind::AppImage);
+        assert_eq!(p.name, name.split('-').next().unwrap());
+        assert_eq!(p.warnings.len(), 1);
+        assert!(p.warnings[0].starts_with("could not read AppImage contents"));
     }
 }

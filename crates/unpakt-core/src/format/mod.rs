@@ -8,7 +8,10 @@ use std::path::Path;
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Artifact, FormatKind, Payload};
 
+pub mod appimage;
 pub mod tarball;
+
+pub use appimage::squashfs_offset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Confidence {
@@ -23,10 +26,11 @@ pub trait FormatPlugin: Sync {
     fn inspect(&self, a: &Artifact) -> Result<Payload>;
 }
 
+static APPIMAGE: appimage::AppImage = appimage::AppImage;
 static TARBALL: tarball::Tarball = tarball::Tarball;
 
-fn registry() -> [&'static dyn FormatPlugin; 1] {
-    [&TARBALL]
+fn registry() -> [&'static dyn FormatPlugin; 2] {
+    [&APPIMAGE, &TARBALL]
 }
 
 /// Picks the plugin that recognises `a`, or names the unsupported format.

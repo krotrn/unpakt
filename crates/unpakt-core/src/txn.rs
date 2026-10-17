@@ -65,6 +65,13 @@ impl Txn {
 
     /// Creates `p` and any missing parents; undo removes only the dirs created here.
     pub fn create_dir_all(&mut self, p: &Path) -> Result<()> {
+        if exists_nofollow(p) {
+            return if p.is_dir() {
+                Ok(())
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)).at(p)
+            };
+        }
         let mut missing = Vec::new();
         let mut cur = Some(p);
         while let Some(c) = cur {
@@ -106,28 +113,35 @@ impl Txn {
             let _ = fs::remove_file(&tmp);
             return Err(e).at(&tmp);
         }
-        let existed = exists_nofollow(p);
-        let backup = if existed {
-            let bak = sibling(p, "bak");
-            if let Err(e) = fs::rename(p, &bak) {
+        let backup = match fs::symlink_metadata(p) {
+            Ok(m) if m.file_type().is_dir() => {
                 let _ = fs::remove_file(&tmp);
-                return Err(e).at(p);
+                return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory)).at(p);
             }
-            self.log.push(Undo::Restore {
-                orig: p.to_path_buf(),
-                backup: bak.clone(),
-            });
-            Some(bak)
-        } else {
-            None
+            Ok(_) => {
+                let bak = sibling(p, "bak");
+                if let Err(e) = fs::hard_link(p, &bak) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e).at(p);
+                }
+                Some(bak)
+            }
+            Err(_) => None,
         };
         if let Err(e) = fs::rename(&tmp, p) {
             let _ = fs::remove_file(&tmp);
+            if let Some(bak) = &backup {
+                let _ = fs::remove_file(bak);
+            }
             return Err(e).at(p);
         }
-        if backup.is_none() {
-            self.log.push(Undo::RemoveNew(p.to_path_buf()));
-        }
+        self.log.push(match backup {
+            Some(backup) => Undo::Restore {
+                orig: p.to_path_buf(),
+                backup,
+            },
+            None => Undo::RemoveNew(p.to_path_buf()),
+        });
         Ok(())
     }
 

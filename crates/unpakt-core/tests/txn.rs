@@ -98,3 +98,44 @@ fn rename_and_remove_file_roll_back() {
     }
     assert_eq!(tree_snapshot(root), before);
 }
+
+#[test]
+fn create_dir_all_over_file_fails_and_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::write(root.join("f"), b"1").unwrap();
+    symlink("nowhere", root.join("dangling")).unwrap();
+    let before = tree_snapshot(root);
+    let mut t = Txn::new();
+    assert!(t.create_dir_all(&root.join("f")).is_err());
+    assert!(t.create_dir_all(&root.join("f/sub")).is_err());
+    assert!(t.create_dir_all(&root.join("dangling")).is_err());
+    drop(t);
+    assert_eq!(tree_snapshot(root), before);
+}
+
+#[test]
+fn write_over_existing_replaces_and_rolls_back_content_and_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("f");
+    fs::write(&p, b"old").unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    let before = tree_snapshot(tmp.path());
+    {
+        let mut t = Txn::new();
+        t.write(&p, b"new", 0o755).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+        assert!(t.write(tmp.path(), b"x", 0o644).is_err());
+    }
+    assert_eq!(fs::read(&p).unwrap(), b"old");
+    assert_eq!(
+        fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+    assert_eq!(tree_snapshot(tmp.path()), before);
+}

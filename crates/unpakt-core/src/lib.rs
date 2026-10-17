@@ -1,6 +1,7 @@
 pub mod desktop;
 pub mod error;
 pub mod format;
+pub mod host;
 pub mod manifest;
 pub mod model;
 pub mod naming;

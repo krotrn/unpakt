@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod desktop;
 pub mod error;
 pub mod format;

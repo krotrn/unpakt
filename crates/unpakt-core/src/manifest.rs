@@ -207,16 +207,18 @@ impl Manifest {
         ver: &VersionRecord,
         files: &[FileRecord],
     ) -> Result<()> {
-        self.commit_install_with(app, ver, files, &[])
+        self.commit_install_with(app, ver, files, &[], &[])
     }
 
-    /// Like `commit_install`, and also stores `options` in the same transaction.
+    /// Like `commit_install`, and in the same transaction also stores `options`
+    /// and drops the version rows labelled in `prune`.
     pub fn commit_install_with(
         &mut self,
         app: &AppRecord,
         ver: &VersionRecord,
         files: &[FileRecord],
         options: &[(&str, &str)],
+        prune: &[&str],
     ) -> Result<()> {
         let ts = now();
         let tx = self.conn.transaction()?;
@@ -270,6 +272,12 @@ impl Manifest {
                 "INSERT INTO options (app_id, key, value) VALUES (?1, ?2, ?3) \
                  ON CONFLICT(app_id, key) DO UPDATE SET value = excluded.value",
                 params![app.id, key, value],
+            )?;
+        }
+        for label in prune {
+            tx.execute(
+                "DELETE FROM versions WHERE app_id = ?1 AND label = ?2",
+                params![app.id, label],
             )?;
         }
         tx.commit()?;
@@ -571,13 +579,50 @@ mod tests {
     #[test]
     fn failed_install_with_options_leaves_no_option_rows() {
         let mut m = Manifest::open_in_memory().unwrap();
-        m.commit_install_with(&app("demo", "a"), &ver("a", 1), &[], &[("entry", "bin/a")])
-            .unwrap();
+        m.commit_install_with(
+            &app("demo", "a"),
+            &ver("a", 1),
+            &[],
+            &[("entry", "bin/a")],
+            &[],
+        )
+        .unwrap();
         assert!(
-            m.commit_install_with(&app("demo", "a"), &ver("a", 2), &[], &[("pattern", "*.x")])
-                .is_err()
+            m.commit_install_with(
+                &app("demo", "a"),
+                &ver("a", 2),
+                &[],
+                &[("pattern", "*.x")],
+                &[]
+            )
+            .is_err()
         );
         assert_eq!(m.option("demo", "entry").unwrap().as_deref(), Some("bin/a"));
         assert_eq!(m.option("demo", "pattern").unwrap(), None);
+    }
+
+    #[test]
+    fn failed_commit_keeps_rows_it_would_have_pruned() {
+        let mut m = Manifest::open_in_memory().unwrap();
+        m.commit_install(&app("demo", "a"), &ver("a", 1), &[])
+            .unwrap();
+        m.commit_install(&app("demo", "b"), &ver("b", 2), &[])
+            .unwrap();
+        // Re-adding label `b` fails on the primary key, after the prune ran.
+        assert!(
+            m.commit_install_with(&app("demo", "b"), &ver("b", 3), &[], &[], &["a"])
+                .is_err()
+        );
+        assert_eq!(m.versions("demo").unwrap().len(), 2);
+
+        m.commit_install_with(&app("demo", "c"), &ver("c", 3), &[], &[], &["a"])
+            .unwrap();
+        let labels: Vec<_> = m
+            .versions("demo")
+            .unwrap()
+            .into_iter()
+            .map(|v| v.label)
+            .collect();
+        assert_eq!(labels, ["c", "b"]);
     }
 }

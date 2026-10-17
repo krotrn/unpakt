@@ -36,6 +36,14 @@ pub struct UpdateInfo {
     pub latest: String,
 }
 
+/// The outcome of looking for updates.
+#[derive(Debug, Default)]
+pub struct UpdateCheck {
+    pub updates: Vec<UpdateInfo>,
+    /// Apps whose release could not be fetched, with the reason.
+    pub failed: Vec<(String, Error)>,
+}
+
 /// Removes a per-operation download directory when dropped.
 struct DownloadGuard(Option<PathBuf>);
 
@@ -429,34 +437,32 @@ impl Engine {
             options.push(("pattern", pattern));
         }
         self.manifest
-            .commit_install_with(&app, &version, &integration.files, &options)?;
+            .commit_install_with(&app, &version, &integration.files, &options, &[])?;
         txn.commit();
         self.refresh_desktop_database();
         Ok(app)
     }
 
     /// Apps with a newer release than the installed one. Local-file apps have
-    /// no origin to ask and are skipped.
-    pub fn check_updates(&self, id: Option<&str>) -> Result<Vec<UpdateInfo>> {
+    /// no origin to ask and are skipped. Apps that could not be checked are
+    /// reported in `failed`, never as up to date.
+    pub fn check_updates(&self, id: Option<&str>) -> Result<UpdateCheck> {
         let apps = match id {
             Some(id) => vec![self.get(id)?.0],
             None => self.manifest.list()?,
         };
-        let mut found = Vec::new();
+        let mut check = UpdateCheck::default();
         for app in apps {
             if app.source.kind == SourceKind::LocalFile {
                 continue;
             }
             match self.check_app_update(&app) {
-                Ok(Some(info)) => found.push(info),
+                Ok(Some(info)) => check.updates.push(info),
                 Ok(None) => {}
-                Err(e) if id.is_none() => {
-                    tracing::warn!("{}: cannot check for updates: {e}", app.id)
-                }
-                Err(e) => return Err(e),
+                Err(e) => check.failed.push((app.id.clone(), e)),
             }
         }
-        Ok(found)
+        Ok(check)
     }
 
     fn check_app_update(&self, app: &AppRecord) -> Result<Option<UpdateInfo>> {
@@ -511,6 +517,18 @@ impl Engine {
         if versions.iter().any(|v| v.label == label) {
             return Ok(None);
         }
+        // The release that was just fetched may differ from the one checked
+        // above, so the downgrade guard applies to what is about to be installed.
+        if app.source.kind == SourceKind::Github {
+            let fetched = Release {
+                version: p.marker.clone(),
+                marker: p.marker.clone(),
+                assets: Vec::new(),
+            };
+            if newer_release(&app, &current, &fetched).is_none() {
+                return Ok(None);
+            }
+        }
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
@@ -554,6 +572,7 @@ impl Engine {
             }
         }
 
+        let pruned_labels: Vec<&str> = pruned.iter().map(|v| v.label.as_str()).collect();
         let record = AppRecord {
             id: id.to_string(),
             name: p.plan.name.clone(),
@@ -572,11 +591,13 @@ impl Engine {
             exec_kind: installed.kind,
             installed_at: now(),
         };
-        self.manifest
-            .commit_install_with(&record, &version, &integration.files, &[])?;
-        for v in pruned {
-            self.manifest.delete_version(id, &v.label)?;
-        }
+        self.manifest.commit_install_with(
+            &record,
+            &version,
+            &integration.files,
+            &[],
+            &pruned_labels,
+        )?;
         txn.commit();
         self.refresh_desktop_database();
         Ok(Some(label))

@@ -77,9 +77,6 @@ enum Command {
         /// Only list available updates
         #[arg(long)]
         check: bool,
-        /// Accepted for scripts; updates never ask for confirmation
-        #[arg(long)]
-        yes: bool,
     },
     /// Switch an app back to its previous version
     Rollback { id: String },
@@ -187,16 +184,18 @@ fn run(command: Command) -> Result<()> {
             engine.remove(&id)?;
             println!("removed {id}");
         }
-        Command::Update { id, check, yes: _ } => {
+        Command::Update { id, check } => {
             if check {
-                output::print_updates(&engine.check_updates(id.as_deref())?);
+                let found = engine.check_updates(id.as_deref())?;
+                output::print_updates(&found.updates);
+                report_failed_checks(&found.failed)?;
             } else {
                 update_apps(&mut engine, id.as_deref())?;
             }
         }
         Command::Rollback { id } => {
             let label = engine.rollback(&id)?;
-            println!("{id}: rolled back to {label}");
+            println!("{label}");
         }
         Command::Doctor => output::print_checks(&engine.doctor()),
     }
@@ -211,10 +210,15 @@ fn update_apps(engine: &mut Engine, id: Option<&str>) -> Result<()> {
         report_update(id, &old, engine.update(id)?);
         return Ok(());
     }
-    let available = engine.check_updates(None)?;
+    let check = engine.check_updates(None)?;
     let mut failed = 0;
     for app in engine.list()? {
-        let Some(info) = available.iter().find(|u| u.id == app.id) else {
+        if let Some((_, e)) = check.failed.iter().find(|(f, _)| *f == app.id) {
+            eprintln!("{}: check failed: {e}", app.id);
+            failed += 1;
+            continue;
+        }
+        let Some(info) = check.updates.iter().find(|u| u.id == app.id) else {
             if app.source.kind != SourceKind::LocalFile {
                 println!("{}: up to date", app.id);
             }
@@ -232,6 +236,17 @@ fn update_apps(engine: &mut Engine, id: Option<&str>) -> Result<()> {
         anyhow::bail!("{failed} update(s) failed");
     }
     Ok(())
+}
+
+fn report_failed_checks(failed: &[(String, Error)]) -> Result<()> {
+    for (id, e) in failed {
+        eprintln!("{id}: check failed: {e}");
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{} update check(s) failed", failed.len())
+    }
 }
 
 fn report_update(id: &str, old: &str, new: Option<String>) {

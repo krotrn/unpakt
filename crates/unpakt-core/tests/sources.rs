@@ -50,6 +50,58 @@ fn resolve_routes_inputs() {
 }
 
 #[test]
+fn github_urls_with_paths_are_not_latest_release() {
+    let (plugin, cfg) = resolve("https://github.com/o/r/releases/download/v1/x.AppImage").unwrap();
+    assert_eq!(plugin.kind(), SourceKind::DirectUrl);
+    assert_eq!(
+        cfg.location,
+        "https://github.com/o/r/releases/download/v1/x.AppImage"
+    );
+
+    for url in [
+        "https://github.com/o/r/releases/tag/v1",
+        "https://github.com/o/r/tree/main",
+        "https://github.com/o/r/blob/main/x",
+        "https://github.com/settings/profile/x",
+    ] {
+        assert!(matches!(resolve(url), Err(Error::Refused(_))), "{url}");
+    }
+
+    let (plugin, cfg) = resolve("https://github.com/o/r.git/").unwrap();
+    assert_eq!(plugin.kind(), SourceKind::Github);
+    assert_eq!(cfg.location, "https://github.com/o/r");
+}
+
+#[test]
+fn failing_head_does_not_block_direct_url() {
+    let forge = MockForge::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let bytes = tarball_bytes(tmp.path());
+    forge.publish(
+        "v1",
+        vec![("unpakt-fixture-mock-1.2.0.tar.gz".into(), bytes)],
+    );
+    forge.set_head_status(405);
+    let http = Http::new(&forge.api_url(), None).unwrap();
+    let url = forge.download_url("unpakt-fixture-mock-1.2.0.tar.gz");
+    let (plugin, cfg) = resolve(&url).unwrap();
+    let release = plugin.latest(&cfg, &http).unwrap();
+    assert_eq!(release.marker, None);
+    assert_eq!(http.head_marker(&url).unwrap(), None);
+
+    let root = tempfile::tempdir().unwrap();
+    let layout = Layout::under(root.path());
+    let bin = layout.bin.clone();
+    let engine = Engine::new(layout, Host::detect())
+        .unwrap()
+        .with_path_var(bin.into_os_string())
+        .with_http(http);
+    let plan = engine.inspect(&url, AddOpts::default()).unwrap();
+    assert_eq!(plan.marker, None);
+    assert_eq!(plan.plan.label, "1.2.0");
+}
+
+#[test]
 fn github_latest_from_mock() {
     let forge = MockForge::start();
     forge.publish("v1.2.0", vec![("a-1.2.0.tar.gz".into(), b"aaa".to_vec())]);

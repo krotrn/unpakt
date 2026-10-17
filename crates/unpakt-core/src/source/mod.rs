@@ -21,6 +21,7 @@ static LOCAL_FILE: local::LocalSource = local::LocalSource;
 
 /// Picks the source for `input`, trying GitHub, then direct URL, then local file.
 pub fn resolve(input: &str) -> Result<(&'static dyn SourcePlugin, SourceCfg)> {
+    github::check_supported(input)?;
     let plugins: [&'static dyn SourcePlugin; 3] = [&GITHUB, &DIRECT_URL, &LOCAL_FILE];
     plugins
         .into_iter()

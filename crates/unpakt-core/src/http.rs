@@ -114,12 +114,12 @@ impl Http {
         resp.json().map_err(|e| http_err(url, e))
     }
 
-    /// The ETag of `url`, else its Last-Modified, from a HEAD request.
+    /// The ETag of `url`, else its Last-Modified, from a HEAD request. A
+    /// non-success status (many hosts reject HEAD) yields `None`.
     pub fn head_marker(&self, url: &str) -> Result<Option<String>> {
         let resp = self.client.head(url).send().map_err(|e| http_err(url, e))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(http_err(url, format!("status {status}")));
+        if !resp.status().is_success() {
+            return Ok(None);
         }
         Ok(header(&resp, ETAG).or_else(|| header(&resp, LAST_MODIFIED)))
     }

@@ -38,7 +38,11 @@ impl SourcePlugin for UrlSource {
             .unwrap_or("")
             .to_string();
         let version = parse_file_name(&name).1;
-        let marker = http.head_marker(&cfg.location)?;
+        // The marker is optional, so a failing HEAD must not block the install.
+        let marker = http.head_marker(&cfg.location).unwrap_or_else(|e| {
+            tracing::warn!("could not read a version marker: {e}");
+            None
+        });
         Ok(Release {
             version,
             marker,

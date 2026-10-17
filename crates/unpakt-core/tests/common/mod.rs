@@ -182,6 +182,8 @@ struct ForgeState {
     tag: String,
     assets: Vec<(String, Vec<u8>)>,
     truncate: bool,
+    /// When set, HEAD requests are answered with this status and no headers.
+    head_status: Option<u16>,
     /// Path and `Authorization` header of every request received.
     seen: Vec<(String, Option<String>)>,
 }
@@ -242,6 +244,10 @@ impl MockForge {
 
     pub fn set_truncate(&self, on: bool) {
         self.state.lock().unwrap().truncate = on;
+    }
+
+    pub fn set_head_status(&self, status: u16) {
+        self.state.lock().unwrap().head_status = Some(status);
     }
 
     /// The quoted ETag served for the asset `name`.
@@ -309,7 +315,13 @@ fn serve(
     let head = method == "HEAD";
 
     let (status, extra, body, claimed_len): (&str, String, Vec<u8>, usize) =
-        if path == "/repos/o/r/releases/latest" {
+        if let (true, Some(code)) = (head, state.head_status) {
+            let status = match code {
+                405 => "405 Method Not Allowed",
+                _ => "500 Internal Server Error",
+            };
+            (status, String::new(), Vec::new(), 0)
+        } else if path == "/repos/o/r/releases/latest" {
             let assets: Vec<serde_json::Value> = state
                 .assets
                 .iter()

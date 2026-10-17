@@ -21,20 +21,56 @@ struct ApiAsset {
     size: Option<u64>,
 }
 
-/// `(owner, repo)` of `https://github.com/<owner>/<repo>[.git][/...]`.
-fn parse(input: &str) -> Option<(String, String)> {
-    let url = ::url::Url::parse(input).ok()?;
+enum Shape {
+    NotGithub,
+    /// `https://github.com/<owner>/<repo>[.git][/]`.
+    Repo(String, String),
+    /// A release asset link, which is a plain download.
+    AssetDownload,
+    /// Any other github.com page.
+    Unsupported,
+}
+
+fn classify(input: &str) -> Shape {
+    let Ok(url) = ::url::Url::parse(input) else {
+        return Shape::NotGithub;
+    };
     if url.scheme() != "https" || url.host_str() != Some("github.com") {
-        return None;
+        return Shape::NotGithub;
     }
-    let mut segments = url.path_segments()?;
-    let owner = segments.next().filter(|s| !s.is_empty())?;
-    let repo = segments.next()?;
-    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let segments: Vec<&str> = url.path_segments().map_or(Vec::new(), |s| s.collect());
+    let (owner, repo) = match segments.as_slice() {
+        [owner, repo, ..] if !owner.is_empty() => {
+            (*owner, repo.strip_suffix(".git").unwrap_or(repo))
+        }
+        _ => return Shape::Unsupported,
+    };
     if repo.is_empty() {
-        return None;
+        return Shape::Unsupported;
     }
-    Some((owner.to_string(), repo.to_string()))
+    match &segments[2..] {
+        [] | [""] => Shape::Repo(owner.to_string(), repo.to_string()),
+        ["releases", "download", ..] => Shape::AssetDownload,
+        _ => Shape::Unsupported,
+    }
+}
+
+/// Fails for github.com pages that are neither a repo nor an asset download.
+pub(super) fn check_supported(input: &str) -> Result<()> {
+    match classify(input) {
+        Shape::Unsupported => Err(Error::Refused(
+            "unsupported GitHub URL; use https://github.com/<owner>/<repo> to track the latest release"
+                .into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn parse(input: &str) -> Option<(String, String)> {
+    match classify(input) {
+        Shape::Repo(owner, repo) => Some((owner, repo)),
+        _ => None,
+    }
 }
 
 impl SourcePlugin for GithubSource {

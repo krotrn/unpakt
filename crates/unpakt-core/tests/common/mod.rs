@@ -176,3 +176,190 @@ pub fn build_appimage(dir: &Path, name: &str, files: &[E]) -> PathBuf {
     std::fs::write(&path, image).unwrap();
     path
 }
+
+#[derive(Default)]
+struct ForgeState {
+    tag: String,
+    assets: Vec<(String, Vec<u8>)>,
+    truncate: bool,
+    /// Path and `Authorization` header of every request received.
+    seen: Vec<(String, Option<String>)>,
+}
+
+/// An in-process stand-in for a release API and its download host. It serves
+/// `/repos/o/r/releases/latest` and `/dl/<name>` on a loopback port.
+pub struct MockForge {
+    port: u16,
+    state: std::sync::Arc<std::sync::Mutex<ForgeState>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl MockForge {
+    pub fn start() -> MockForge {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let state = Arc::new(Mutex::new(ForgeState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let state = Arc::clone(&state);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Ok(stream) = stream {
+                        let _ = serve(stream, port, &state);
+                    }
+                }
+            })
+        };
+        MockForge {
+            port,
+            state,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn api_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub fn download_url(&self, name: &str) -> String {
+        format!("http://127.0.0.1:{}/dl/{name}", self.port)
+    }
+
+    pub fn publish(&self, tag: &str, assets: Vec<(String, Vec<u8>)>) {
+        let mut state = self.state.lock().unwrap();
+        state.tag = tag.to_string();
+        state.assets = assets;
+    }
+
+    pub fn set_truncate(&self, on: bool) {
+        self.state.lock().unwrap().truncate = on;
+    }
+
+    /// The quoted ETag served for the asset `name`.
+    pub fn etag(&self, name: &str) -> String {
+        let state = self.state.lock().unwrap();
+        let (_, bytes) = state.assets.iter().find(|(n, _)| n == name).unwrap();
+        etag_of(bytes)
+    }
+
+    /// The `Authorization` headers received for requests to `path`.
+    pub fn auth_for(&self, path: &str) -> Vec<Option<String>> {
+        let state = self.state.lock().unwrap();
+        state
+            .seen
+            .iter()
+            .filter(|(p, _)| p == path)
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+}
+
+impl Drop for MockForge {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn etag_of(bytes: &[u8]) -> String {
+    format!("\"{}\"", &hex::encode(Sha256::digest(bytes))[..16])
+}
+
+fn serve(
+    mut stream: std::net::TcpStream,
+    port: u16,
+    state: &std::sync::Mutex<ForgeState>,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader};
+
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+    let mut auth = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("authorization")
+        {
+            auth = Some(value.trim().to_string());
+        }
+    }
+
+    let mut state = state.lock().unwrap();
+    state.seen.push((path.clone(), auth));
+    let head = method == "HEAD";
+
+    let (status, extra, body, claimed_len): (&str, String, Vec<u8>, usize) =
+        if path == "/repos/o/r/releases/latest" {
+            let assets: Vec<serde_json::Value> = state
+                .assets
+                .iter()
+                .map(|(name, bytes)| {
+                    serde_json::json!({
+                        "name": name,
+                        "browser_download_url": format!("http://127.0.0.1:{port}/dl/{name}"),
+                        "size": bytes.len(),
+                    })
+                })
+                .collect();
+            let body =
+                serde_json::to_vec(&serde_json::json!({"tag_name": state.tag, "assets": assets}))
+                    .unwrap();
+            let len = body.len();
+            (
+                "200 OK",
+                "Content-Type: application/json\r\n".into(),
+                body,
+                len,
+            )
+        } else if let Some(name) = path.strip_prefix("/dl/")
+            && let Some((_, bytes)) = state.assets.iter().find(|(n, _)| n == name)
+        {
+            let claimed = if state.truncate {
+                bytes.len() + 1024
+            } else {
+                bytes.len()
+            };
+            (
+                "200 OK",
+                format!(
+                    "ETag: {}\r\nLast-Modified: Sat, 01 Jan 2000 00:00:00 GMT\r\n",
+                    etag_of(bytes)
+                ),
+                bytes.clone(),
+                claimed,
+            )
+        } else {
+            ("404 Not Found", String::new(), Vec::new(), 0)
+        };
+    drop(state);
+
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\n{extra}Content-Length: {claimed_len}\r\nConnection: close\r\n\r\n"
+    )?;
+    if !head {
+        stream.write_all(&body)?;
+    }
+    stream.flush()?;
+    Ok(())
+}

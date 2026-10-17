@@ -2119,6 +2119,7 @@ dependencies = [
  "goblin",
  "hex",
  "liblzma",
+ "percent-encoding",
  "regex",
  "reqwest",
  "rusqlite",
@@ -2130,6 +2131,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "url",
  "zstd 0.14.3",
 ]
 

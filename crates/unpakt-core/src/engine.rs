@@ -7,16 +7,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use crate::backend::{Plan, for_payload};
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::detect;
 use crate::host::Host;
+use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
 use crate::manifest::{AppRecord, FileRecord, Manifest, VersionRecord};
 use crate::model::{Artifact, FormatKind, SourceCfg, SourceKind};
 use crate::naming::{slug, version_label};
+use crate::select::choose;
+use crate::source::resolve;
 use crate::{Layout, Txn};
 
 const UPDATE_DESKTOP_DATABASE: &str = "update-desktop-database";
@@ -55,6 +59,7 @@ pub struct Engine {
     manifest: Manifest,
     host: Host,
     path_var: OsString,
+    http: Http,
 }
 
 fn now() -> i64 {
@@ -115,11 +120,17 @@ impl Engine {
             manifest,
             host,
             path_var: std::env::var_os("PATH").unwrap_or_default(),
+            http: Http::from_env()?,
         })
     }
 
     pub fn with_path_var(mut self, path_var: OsString) -> Engine {
         self.path_var = path_var;
+        self
+    }
+
+    pub fn with_http(mut self, http: Http) -> Engine {
+        self.http = http;
         self
     }
 
@@ -131,12 +142,33 @@ impl Engine {
         &self.layout
     }
 
+    /// Downloads into a fresh directory under the cache, so equal file names
+    /// from different URLs never collide. Downloads are not installed state.
+    fn download_asset(&self, url: &str) -> Result<PathBuf> {
+        let root = self.layout.cache.join("downloads");
+        std::fs::create_dir_all(&root).at(&root)?;
+        let dir = tempfile::Builder::new()
+            .prefix("dl-")
+            .tempdir_in(&root)
+            .at(&root)?
+            .keep();
+        Ok(self.http.download(url, &dir)?.path)
+    }
+
     pub fn inspect(&self, input: &str, opts: AddOpts) -> Result<InstallPlan> {
-        let path = Path::new(input);
-        if !path.is_file() {
-            return Err(Error::NotFound(format!("{input} is not an existing file")));
-        }
-        let canonical = path.canonicalize().at(path)?;
+        let (plugin, source) = resolve(input)?;
+        let pattern = opts
+            .pattern
+            .as_deref()
+            .map(Regex::new)
+            .transpose()
+            .map_err(|e| Error::Parse(format!("invalid --pattern: {e}")))?;
+        let release = plugin.latest(&source, &self.http)?;
+        let asset = choose(&release.assets, &self.host, pattern.as_ref())?;
+        let canonical = match source.kind {
+            SourceKind::LocalFile => PathBuf::from(&asset.url),
+            _ => self.download_asset(&asset.url)?,
+        };
         let file_name = canonical
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -171,7 +203,11 @@ impl Engine {
             }
         };
 
-        let label = match &payload.version {
+        let label_version = match source.kind {
+            SourceKind::LocalFile => payload.version.as_deref(),
+            SourceKind::DirectUrl | SourceKind::Github => release.version.as_deref(),
+        };
+        let label = match label_version {
             Some(v) => version_label(v),
             None => sha256_prefix(&canonical)?,
         };
@@ -208,11 +244,6 @@ impl Engine {
             }
         };
 
-        let source = SourceCfg {
-            kind: SourceKind::LocalFile,
-            location: canonical.to_string_lossy().into_owned(),
-            pattern: None,
-        };
         let plan = Plan {
             id,
             name: payload.name.clone(),
@@ -224,7 +255,7 @@ impl Engine {
         Ok(InstallPlan {
             plan,
             source,
-            marker: None,
+            marker: release.marker,
             backend: backend.id(),
             want_desktop,
             command,

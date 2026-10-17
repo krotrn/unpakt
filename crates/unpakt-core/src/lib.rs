@@ -4,12 +4,14 @@ pub mod engine;
 pub mod error;
 pub mod format;
 pub mod host;
+pub mod http;
 pub mod integrate;
 pub mod manifest;
 pub mod model;
 pub mod naming;
 pub mod paths;
 pub mod select;
+pub mod source;
 pub mod txn;
 pub mod version;
 

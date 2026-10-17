@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod desktop;
+pub mod engine;
 pub mod error;
 pub mod format;
 pub mod host;

@@ -56,6 +56,9 @@ enum Command {
         /// Overwrite files that unpakt does not own
         #[arg(long)]
         force: bool,
+        /// Regex selecting the release asset to install
+        #[arg(long, value_name = "REGEX")]
+        pattern: Option<String>,
     },
     /// Show what installing a package would do
     Inspect { input: String },
@@ -142,6 +145,7 @@ fn run(command: Command) -> Result<()> {
             no_desktop,
             no_bin,
             force,
+            pattern,
         } => {
             let desktop = match (desktop, no_desktop) {
                 (true, _) => Some(true),
@@ -155,7 +159,7 @@ fn run(command: Command) -> Result<()> {
                 desktop,
                 no_bin,
                 force,
-                pattern: None,
+                pattern,
             };
             let plan = engine.inspect(&input, opts)?;
             output::print_summary(&plan);

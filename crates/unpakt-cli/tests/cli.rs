@@ -363,3 +363,32 @@ fn update_check_of_an_unknown_id_fails_naming_it() {
     assert!(stderr(&out).contains("no-such-app"), "{}", stderr(&out));
     assert_eq!(stdout(&out), "");
 }
+
+#[test]
+fn remove_reports_waiting_for_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let added = run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
+    let list = stdout(&run(tmp.path(), &["list"]));
+    let id = list.split_whitespace().next().expect("one listed app");
+
+    let held =
+        unpakt_core::lock::acquire(&tmp.path().join(".local/share/unpakt/lock"), || {}).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_unpakt"))
+        .env_clear()
+        .env("UNPAKT_ROOT", tmp.path())
+        .env("HOME", tmp.path())
+        .env("PATH", "/usr/bin:/bin")
+        .args(["remove", id, "--yes"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    drop(held);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("waiting for another unpakt operation to finish…"));
+}

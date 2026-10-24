@@ -12,6 +12,7 @@ use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine};
 use unpakt_core::model::SourceKind;
+use unpakt_core::progress::Progress;
 
 const EXIT_ERROR: u8 = 1;
 const EXIT_REFUSED: u8 = 2;
@@ -181,7 +182,13 @@ impl Interrupt {
 
 fn run(command: Command) -> Result<()> {
     let interrupt = Interrupt::install();
-    let mut engine = Engine::open_default()?.with_cancel(interrupt.cancel.clone());
+    let mut engine = Engine::open_default()?
+        .with_cancel(interrupt.cancel.clone())
+        .with_progress(Arc::new(|event| {
+            if event == Progress::WaitingForLock {
+                eprintln!("waiting for another unpakt operation to finish…");
+            }
+        }));
     match command {
         Command::Add {
             input,

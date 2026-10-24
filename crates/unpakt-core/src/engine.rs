@@ -20,6 +20,7 @@ use crate::format::detect;
 use crate::host::Host;
 use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
+use crate::lock::{self, WriteLock};
 use crate::manifest::{AppRecord, FileKind, FileRecord, Manifest, VersionRecord};
 use crate::model::{
     Artifact, EntryCandidate, FormatKind, Icon, Payload, Release, SourceCfg, SourceKind,
@@ -267,6 +268,26 @@ impl Engine {
 
     fn emit(&self, event: Progress) {
         (self.progress)(event);
+    }
+
+    /// Takes the write lock, reporting `WaitingForLock` if it has to wait.
+    fn begin(&mut self) -> Result<WriteLock> {
+        lock::acquire(&self.layout.data.join("lock"), || {
+            self.emit(Progress::WaitingForLock)
+        })
+    }
+
+    /// Takes the write lock and fails if `app` is no longer what the caller
+    /// read before it started working.
+    fn lock_unchanged(&mut self, app: &AppRecord) -> Result<WriteLock> {
+        let lock = self.begin()?;
+        match self.manifest.get(&app.id)? {
+            Some(now) if now.current == app.current => Ok(lock),
+            _ => Err(Error::Conflict(format!(
+                "{} was changed by another unpakt process; try again",
+                app.id
+            ))),
+        }
     }
 
     pub fn with_http(mut self, http: Http) -> Engine {
@@ -518,6 +539,7 @@ impl Engine {
     pub fn install(&mut self, p: InstallPlan) -> Result<AppRecord> {
         let _download = self.download_guard(&p.plan.artifact.path);
         let id = p.plan.id.clone();
+        let _lock = self.begin()?;
         if self.manifest.get(&id)?.is_some() {
             return Err(Error::Conflict(format!(
                 "{id} is already installed; use `unpakt update {id}`"
@@ -655,6 +677,7 @@ impl Engine {
             if let Some(target) = versions.iter().find(|v| v.label == label)
                 && label != current.label
             {
+                let _lock = self.lock_unchanged(&app)?;
                 self.activate(&app, target, &files)?;
                 return Ok(Some(label));
             }
@@ -684,6 +707,7 @@ impl Engine {
                 assets: Vec::new(),
             };
             if label != current.label && newer_release(&app, &current, &fetched).is_some() {
+                let _lock = self.lock_unchanged(&app)?;
                 self.activate(&app, target, &files)?;
                 return Ok(Some(label));
             }
@@ -704,6 +728,7 @@ impl Engine {
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
+        let _lock = self.lock_unchanged(&app)?;
         self.emit(Progress::Installing);
         let mut txn = Txn::with_cancel(self.cancel.clone());
         let known: Vec<&str> = versions.iter().map(|v| v.label.as_str()).collect();
@@ -781,6 +806,7 @@ impl Engine {
 
     /// Makes the next-older installed version current again. Nothing is deleted.
     pub fn rollback(&mut self, id: &str) -> Result<String> {
+        let _lock = self.begin()?;
         let (app, versions, files) = self.get(id)?;
         let pos = versions
             .iter()
@@ -871,6 +897,7 @@ impl Engine {
     }
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
+        let _lock = self.begin()?;
         let (_, _, files) = self.get(id)?;
         self.emit(Progress::Installing);
         let mut txn = Txn::with_cancel(self.cancel.clone());

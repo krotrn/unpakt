@@ -33,7 +33,14 @@ fn fixture_tarball(dir: &Path) -> PathBuf {
 }
 
 fn engine(root: &Path) -> Engine {
-    Engine::new(Layout::under(root), Host::detect()).unwrap()
+    Engine::new(
+        Layout::under(root),
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
 }
 
 /// Runs one command and returns every event it emitted, in order.

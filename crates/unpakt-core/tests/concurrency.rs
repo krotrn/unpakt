@@ -26,9 +26,15 @@ const REPO: &str = "https://github.com/o/r";
 fn engine(root: &Path) -> Engine {
     let layout = Layout::under(root);
     let bin = OsString::from(layout.bin.clone());
-    Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(bin)
+    Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
 }
 
 fn install_local(engine: &mut Engine, dir: &Path) -> String {

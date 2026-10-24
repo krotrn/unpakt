@@ -63,9 +63,15 @@ fn install_never_executes_input() {
         let root = tempfile::tempdir().unwrap();
         let layout = Layout::under(root.path());
         let bin = OsString::from(&layout.bin);
-        let mut engine = Engine::new(layout, Host::detect())
-            .unwrap()
-            .with_path_var(bin);
+        let mut engine = Engine::new(
+            layout,
+            Host {
+                fuse2: true,
+                ..Host::detect()
+            },
+        )
+        .unwrap()
+        .with_path_var(bin);
         let plan = engine
             .inspect(path.to_str().unwrap(), AddOpts::default())
             .unwrap();
@@ -101,10 +107,16 @@ fn update_never_executes_input() {
     let root = tempfile::tempdir().unwrap();
     let layout = Layout::under(root.path());
     let bin = OsString::from(&layout.bin);
-    let mut engine = Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(bin)
-        .with_http(Http::new(&forge.api_url(), None).unwrap());
+    let mut engine = Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
+    .with_http(Http::new(&forge.api_url(), None).unwrap());
 
     publish("1.0.0");
     let plan = engine

@@ -308,8 +308,9 @@ fn failed_install_step_restores_everything() {
 
     publish(&forge, src.path(), "1.0.0");
     let id = install_latest(&mut engine);
-    // A leftover directory with the new label makes the backend refuse.
-    std::fs::create_dir(layout.apps.join(&id).join("2.0.0")).unwrap();
+    // A stray file with the new label (never cleared as a stale version
+    // directory) makes the backend refuse.
+    std::fs::write(layout.apps.join(&id).join("2.0.0"), "stray").unwrap();
     let before = tree_snapshot(root.path());
 
     publish(&forge, src.path(), "2.0.0");

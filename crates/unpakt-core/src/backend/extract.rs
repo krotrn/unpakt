@@ -2,10 +2,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tar::EntryType;
 
-use super::{Backend, Installed, Plan, version_dir};
+use super::{Backend, Installed, Plan, copy_cancellable, version_dir};
+use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::open_tar;
 use crate::model::{FormatKind, Payload};
@@ -29,16 +31,16 @@ impl Backend for Extract {
             .ok_or_else(|| Error::NotFound("entry point for extract".into()))?;
         let dir = version_dir(plan, layout)?;
         let app_dir = layout.apps.join(&plan.id);
-        let staging = app_dir.join(format!(".staging-{}", plan.label));
+        let staging = app_dir.join(staging_name(&plan.label));
 
         txn.create_dir_all(&app_dir)?;
-        fs::create_dir(&staging).at(&staging)?;
-        txn.track_new(&staging);
+        txn.create_dir_new(&staging)?;
 
         unpack(
             &plan.artifact.path,
             &staging,
             plan.payload.strip_prefix.as_deref(),
+            &txn.cancel().clone(),
         )?;
         txn.rename(&staging, &dir)?;
         Ok(Installed {
@@ -47,6 +49,14 @@ impl Backend for Extract {
             kind: entry.kind,
         })
     }
+}
+
+/// A staging name no earlier (interrupted) run can have used.
+fn staging_name(label: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!(".staging-{label}-{}-{nanos}", std::process::id())
 }
 
 fn unsafe_path(what: impl std::fmt::Display) -> Error {
@@ -129,10 +139,16 @@ fn symlink_target_is_inside(rel: &Path, target: &Path) -> bool {
     up <= depth
 }
 
-fn unpack(archive_path: &Path, staging: &Path, strip: Option<&Path>) -> Result<()> {
+fn unpack(
+    archive_path: &Path,
+    staging: &Path,
+    strip: Option<&Path>,
+    cancel: &Cancel,
+) -> Result<()> {
     let mut archive = open_tar(archive_path)?;
     let entries = archive.entries().at(archive_path)?;
     for entry in entries {
+        cancel.check()?;
         let mut entry = entry.at(archive_path)?;
         let kind = entry.header().entry_type();
         if !matches!(
@@ -180,7 +196,7 @@ fn unpack(archive_path: &Path, staging: &Path, strip: Option<&Path>) -> Result<(
                     .mode(mode)
                     .open(&dest)
                     .at(&dest)?;
-                std::io::copy(&mut entry as &mut dyn Read, &mut out).at(&dest)?;
+                copy_cancellable(&mut entry as &mut dyn Read, &mut out, cancel, &dest)?;
                 drop(out);
                 fs::set_permissions(&dest, fs::Permissions::from_mode(mode)).at(&dest)?;
             }

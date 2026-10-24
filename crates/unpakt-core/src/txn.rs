@@ -1,3 +1,4 @@
+use crate::cancel::Cancel;
 use crate::error::{IoResultExt, Result};
 use std::ffi::OsString;
 use std::fs;
@@ -47,6 +48,7 @@ enum Undo {
 pub struct Txn {
     log: Vec<Undo>,
     committed: bool,
+    cancel: Cancel,
 }
 
 impl Default for Txn {
@@ -57,10 +59,22 @@ impl Default for Txn {
 
 impl Txn {
     pub fn new() -> Txn {
+        Txn::with_cancel(Cancel::new())
+    }
+
+    /// A transaction whose long-running steps stop with `Interrupted` once
+    /// `cancel` is set; dropping it then undoes everything.
+    pub fn with_cancel(cancel: Cancel) -> Txn {
         Txn {
             log: Vec::new(),
             committed: false,
+            cancel,
         }
+    }
+
+    /// The cancellation flag that loops working for this transaction poll.
+    pub fn cancel(&self) -> &Cancel {
+        &self.cancel
     }
 
     /// Creates `p` and any missing parents; undo removes only the dirs created here.
@@ -88,6 +102,14 @@ impl Txn {
                 Err(e) => return Err(e).at(&dir),
             }
         }
+        Ok(())
+    }
+
+    /// Creates the single directory `p`, which must not exist yet. Undo
+    /// removes it with whatever was put inside.
+    pub fn create_dir_new(&mut self, p: &Path) -> Result<()> {
+        fs::create_dir(p).at(p)?;
+        self.log.push(Undo::RemoveNew(p.to_path_buf()));
         Ok(())
     }
 

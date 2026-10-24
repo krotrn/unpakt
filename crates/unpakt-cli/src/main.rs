@@ -7,11 +7,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 use unpakt_core::Error;
+use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine};
 use unpakt_core::model::SourceKind;
 
 const EXIT_ERROR: u8 = 1;
 const EXIT_REFUSED: u8 = 2;
+const EXIT_INTERRUPTED: u8 = 130;
 
 #[derive(Parser)]
 #[command(
@@ -132,8 +134,26 @@ fn confirm(verb: &str, question: &str) -> Result<()> {
     }
 }
 
+/// Makes SIGINT and SIGTERM stop the running operation cleanly: the first one
+/// sets the flag the engine polls, so its changes are undone; a second one
+/// exits at once.
+fn cancel_on_signal() -> Cancel {
+    let cancel = Cancel::new();
+    let handler = cancel.clone();
+    let installed = ctrlc::set_handler(move || {
+        if handler.is_cancelled() {
+            std::process::exit(i32::from(EXIT_INTERRUPTED));
+        }
+        handler.cancel();
+    });
+    if let Err(e) = installed {
+        eprintln!("warning: cannot install the interrupt handler: {e}");
+    }
+    cancel
+}
+
 fn run(command: Command) -> Result<()> {
-    let mut engine = Engine::open_default()?;
+    let mut engine = Engine::open_default()?.with_cancel(cancel_on_signal());
     match command {
         Command::Add {
             input,
@@ -261,6 +281,9 @@ fn report_update(id: &str, old: &str, new: Option<String>) {
 }
 
 fn exit_code(err: &anyhow::Error) -> u8 {
+    if matches!(err.downcast_ref::<Error>(), Some(Error::Interrupted)) {
+        return EXIT_INTERRUPTED;
+    }
     let refused = err.is::<NeedsConfirmation>()
         || matches!(err.downcast_ref::<Error>(), Some(Error::Refused(_)));
     if refused { EXIT_REFUSED } else { EXIT_ERROR }

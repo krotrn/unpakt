@@ -35,6 +35,9 @@ jobs:
         with:
           args: -color
 
+      - name: Release script tests
+        run: python3 -m unittest discover -s scripts/tests -v
+
   test:
     name: Tests and clippy
     runs-on: ubuntu-24.04

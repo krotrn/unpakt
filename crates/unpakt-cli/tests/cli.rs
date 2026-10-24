@@ -71,6 +71,9 @@ fn add_list_info_remove() {
     let id = list.split_whitespace().next().expect("one listed app");
     assert!(id.contains("fixture"), "{list}");
     assert!(list.contains("tarball"), "{list}");
+    let source = tarball.canonicalize().unwrap();
+    assert!(list.contains(source.to_str().unwrap()), "{list}");
+    assert!(list.contains("unpakt-fixture-tool"), "{list}");
 
     let info = run(tmp.path(), &["info", id]);
     assert_eq!(info.status.code(), Some(0));
@@ -98,6 +101,15 @@ fn inspect_prints_candidates_without_installing() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("bin/unpakt-fixture-tool"), "{text}");
+    let source = tarball.canonicalize().unwrap();
+    assert!(
+        text.contains(&format!("source:  {}", source.display())),
+        "{text}"
+    );
+    assert!(
+        text.contains("asset:   unpakt-fixture-tool-1.0.tar.gz"),
+        "{text}"
+    );
     assert_eq!(stdout(&run(tmp.path(), &["list"])), "");
 }
 

@@ -193,6 +193,12 @@ impl Model {
         self.idle().then(|| self.inspect_with(input, opts))
     }
 
+    /// A background reload of the installed apps, for when the window regains
+    /// focus. It never makes the model busy, and is skipped while busy.
+    pub fn refresh_list(&self) -> Option<Cmd> {
+        self.idle().then_some(Cmd::List)
+    }
+
     fn idle(&self) -> bool {
         self.busy == Busy::Idle
     }
@@ -857,5 +863,16 @@ mod tests {
             panic!("expected an inspect command");
         };
         assert!(opts.no_bin);
+    }
+
+    #[test]
+    fn refresh_list_runs_in_the_background_only_when_idle() {
+        let mut m = Model::default();
+        assert!(matches!(m.refresh_list(), Some(Cmd::List)));
+        assert_eq!(m.busy, Busy::Idle);
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert_eq!(m.busy, Busy::Idle);
+        m.start(Op::Update);
+        assert!(m.refresh_list().is_none());
     }
 }

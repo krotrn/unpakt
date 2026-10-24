@@ -255,7 +255,7 @@ jobs:
             install: >-
               zypper --non-interactive install python3 xorg-x11-server-Xvfb xwininfo dbus-1-daemon
               ImageMagick dejavu-fonts libX11-6 libxcb1 libfontconfig1 libfreetype6 libharfbuzz0
-              libfribidi0 libwayland-client0
+              libfribidi0 libwayland-client0 libcom_err2 libgpg-error0
           - name: Arch Linux
             image: archlinux:latest
             install: >-

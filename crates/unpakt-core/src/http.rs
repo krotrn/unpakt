@@ -10,6 +10,7 @@ use reqwest::header::{AUTHORIZATION, ETAG, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 
 const GITHUB_API: &str = "https://api.github.com";
@@ -127,6 +128,17 @@ impl Http {
     /// Streams `url` into `dest_dir/<last path segment>`, replacing any file
     /// already there. The token is never sent.
     pub fn download(&self, url: &str, dest_dir: &Path) -> Result<Download> {
+        self.download_cancellable(url, dest_dir, &Cancel::new())
+    }
+
+    /// Like [`Http::download`], stopping with `Interrupted` once `cancel` is set.
+    pub fn download_cancellable(
+        &self,
+        url: &str,
+        dest_dir: &Path,
+        cancel: &Cancel,
+    ) -> Result<Download> {
+        cancel.check()?;
         let parsed = Url::parse(url).map_err(|e| http_err(url, e))?;
         let name = file_name_of(&parsed)?;
         let mut resp = self
@@ -152,6 +164,7 @@ impl Http {
         let mut total: u64 = 0;
         let mut buf = [0u8; 64 * 1024];
         loop {
+            cancel.check()?;
             let n = resp.read(&mut buf).map_err(|e| http_err(url, e))?;
             if n == 0 {
                 break;

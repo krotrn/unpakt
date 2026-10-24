@@ -21,6 +21,8 @@ pub enum Error {
     Http(String),
     #[error("parse error: {0}")]
     Parse(String),
+    #[error("interrupted")]
+    Interrupted,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

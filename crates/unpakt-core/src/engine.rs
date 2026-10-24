@@ -5,12 +5,13 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use crate::backend::{Plan, for_payload};
+use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::detect;
 use crate::host::Host;
@@ -99,6 +100,7 @@ pub struct Engine {
     host: Host,
     path_var: OsString,
     http: Http,
+    cancel: Cancel,
 }
 
 fn now() -> i64 {
@@ -203,11 +205,18 @@ impl Engine {
             host,
             path_var: std::env::var_os("PATH").unwrap_or_default(),
             http: Http::from_env()?,
+            cancel: Cancel::new(),
         })
     }
 
     pub fn with_path_var(mut self, path_var: OsString) -> Engine {
         self.path_var = path_var;
+        self
+    }
+
+    /// Makes downloads and installs stop with `Interrupted` once `cancel` is set.
+    pub fn with_cancel(mut self, cancel: Cancel) -> Engine {
+        self.cancel = cancel;
         self
     }
 
@@ -224,18 +233,81 @@ impl Engine {
         &self.layout
     }
 
+    /// Removes what an interrupted run left under `apps/<id>`, through `txn`
+    /// so a failing install puts it back. With no `known` versions the app is
+    /// absent from the manifest, so the whole directory is stale. Otherwise
+    /// only version and staging directories the manifest does not list go.
+    /// Backups and trash of a transaction (`.unpakt-*`) are never touched,
+    /// since they may hold original files.
+    fn clear_stale(&self, id: &str, known: &[&str], txn: &mut Txn) -> Result<()> {
+        validate_command(id)?;
+        let app_dir = self.layout.apps.join(id);
+        let Ok(meta) = std::fs::symlink_metadata(&app_dir) else {
+            return Ok(());
+        };
+        if !meta.is_dir() {
+            return Ok(());
+        }
+        if known.is_empty() {
+            tracing::warn!("removing leftover {}", app_dir.display());
+            return txn.remove_dir_all(&app_dir);
+        }
+        let mut stale = Vec::new();
+        for entry in std::fs::read_dir(&app_dir).at(&app_dir)? {
+            let entry = entry.at(&app_dir)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().at(entry.path())?.is_dir();
+            let ours = name.starts_with(".staging-") || !name.starts_with('.');
+            if is_dir && ours && name != "current" && !known.contains(&name.as_str()) {
+                stale.push(entry.path());
+            }
+        }
+        stale.sort();
+        for dir in stale {
+            tracing::warn!("removing leftover {}", dir.display());
+            txn.remove_dir_all(&dir)?;
+        }
+        Ok(())
+    }
+
+    /// Leftover download directories older than this are removed.
+    const STALE_DOWNLOAD_AGE: Duration = Duration::from_secs(24 * 3600);
+
+    fn sweep_old_downloads(root: &Path) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let old = entry.file_name().to_string_lossy().starts_with("dl-")
+                && entry.file_type().is_ok_and(|t| t.is_dir())
+                && entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > Self::STALE_DOWNLOAD_AGE);
+            if old && let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                tracing::warn!("cannot remove old download {}: {e}", entry.path().display());
+            }
+        }
+    }
+
     /// Downloads into a fresh directory under the cache, so equal file names
     /// from different URLs never collide. Downloads are not installed state.
     fn download_asset(&self, url: &str) -> Result<PathBuf> {
         let root = self.layout.cache.join("downloads");
         std::fs::create_dir_all(&root).at(&root)?;
+        Self::sweep_old_downloads(&root);
         let dir = tempfile::Builder::new()
             .prefix("dl-")
             .tempdir_in(&root)
             .at(&root)?
             .keep();
         let guard = DownloadGuard(Some(dir.clone()));
-        let path = self.http.download(url, &dir)?.path;
+        let path = self
+            .http
+            .download_cancellable(url, &dir, &self.cancel)?
+            .path;
         guard.keep();
         Ok(path)
     }
@@ -381,7 +453,8 @@ impl Engine {
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
-        let mut txn = Txn::new();
+        let mut txn = Txn::with_cancel(self.cancel.clone());
+        self.clear_stale(&id, &[], &mut txn)?;
         let installed = backend.install(&p.plan, &self.layout, &mut txn)?;
         let current = self.layout.apps.join(&id).join("current");
         txn.symlink_swap(Path::new(&p.plan.label), &current)?;
@@ -439,6 +512,7 @@ impl Engine {
         if let Some(pattern) = &p.opts.pattern {
             options.push(("pattern", pattern));
         }
+        txn.cancel().check()?;
         self.manifest
             .commit_install_with(&app, &version, &integration.files, &options, &[])?;
         txn.commit();
@@ -556,7 +630,9 @@ impl Engine {
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
-        let mut txn = Txn::new();
+        let mut txn = Txn::with_cancel(self.cancel.clone());
+        let known: Vec<&str> = versions.iter().map(|v| v.label.as_str()).collect();
+        self.clear_stale(id, &known, &mut txn)?;
         let installed = backend.install(&p.plan, &self.layout, &mut txn)?;
         let link = self.layout.apps.join(id).join("current");
         txn.symlink_swap(Path::new(&label), &link)?;
@@ -615,6 +691,7 @@ impl Engine {
             exec_kind: installed.kind,
             installed_at: now(),
         };
+        txn.cancel().check()?;
         self.manifest.commit_install_with(
             &record,
             &version,
@@ -673,7 +750,7 @@ impl Engine {
                 })
             });
 
-        let mut txn = Txn::new();
+        let mut txn = Txn::with_cancel(self.cancel.clone());
         let link = self.layout.apps.join(id).join("current");
         txn.symlink_swap(Path::new(&target.label), &link)?;
         let exec = link.join(&target.entry);

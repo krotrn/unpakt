@@ -1,8 +1,10 @@
 //! Backends turn an inspected package into an installed version directory.
 
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use crate::cancel::Cancel;
+use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Artifact, EntryCandidate, ExecKind, Payload};
 use crate::{Layout, Txn};
 
@@ -54,4 +56,24 @@ fn version_dir(plan: &Plan, layout: &Layout) -> Result<PathBuf> {
         )));
     }
     Ok(dir)
+}
+
+const COPY_CHUNK: usize = 64 * 1024;
+
+/// Copies `from` into `to`, checking `cancel` between chunks.
+fn copy_cancellable(
+    from: &mut dyn Read,
+    to: &mut dyn Write,
+    cancel: &Cancel,
+    at: &Path,
+) -> Result<()> {
+    let mut buf = vec![0u8; COPY_CHUNK];
+    loop {
+        cancel.check()?;
+        let n = from.read(&mut buf).at(at)?;
+        if n == 0 {
+            return Ok(());
+        }
+        to.write_all(&buf[..n]).at(at)?;
+    }
 }

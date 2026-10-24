@@ -183,7 +183,8 @@ impl DesktopEntry {
     }
 
     /// Appends ` (suffix)` to `Name` and every localized `Name[xx]` of the main
-    /// group, so entries for the same program can be told apart. Values stay on
+    /// group, so entries for the same program can be told apart. A value that
+    /// already ends with the suffix is left alone. Values stay on
     /// one line and `suffix` is escaped like any other string.
     pub fn tag_names(&mut self, suffix: &str) {
         let tag = format!(" ({})", escape_string(suffix));
@@ -192,7 +193,10 @@ impl DesktopEntry {
             .lines
             .iter()
             .filter_map(|l| match l {
-                Line::Pair { key, value, .. } if key == "Name" || key.starts_with("Name[") => {
+                Line::Pair { key, value, .. }
+                    if (key == "Name" || key.starts_with("Name["))
+                        && !value.trim_end().ends_with(&tag) =>
+                {
                     Some((key.clone(), format!("{}{tag}", value.trim_end())))
                 }
                 _ => None,
@@ -412,6 +416,15 @@ pub fn field_codes(exec: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tagging_twice_keeps_one_suffix() {
+        let mut e = DesktopEntry::parse("[Desktop Entry]\nName=App\nName[de]=Anwendung\n").unwrap();
+        e.tag_names("app-alt");
+        e.tag_names("app-alt");
+        assert_eq!(e.get("Name"), Some("App (app-alt)"));
+        assert_eq!(e.get("Name[de]"), Some("Anwendung (app-alt)"));
+    }
+
     use super::*;
     use std::process::Command;
 

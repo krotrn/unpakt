@@ -619,3 +619,40 @@ fn rollback_with_cancel_set_is_undone() {
     assert_eq!(tree_snapshot(root.path()), before);
     assert_eq!(engine.get(&id).unwrap().0.current, "2.0.0");
 }
+
+fn name_of(layout: &Layout, id: &str) -> String {
+    let text =
+        std::fs::read_to_string(layout.applications.join(format!("unpakt-{id}.desktop"))).unwrap();
+    text.lines()
+        .find_map(|l| l.strip_prefix("Name="))
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn id_suffix_survives_rollback_and_reactivation_once() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine(root.path(), &forge);
+    let layout = engine.layout().clone();
+
+    publish(&forge, src.path(), "1.0.0");
+    let opts = AddOpts {
+        id: Some("fixture-alt".into()),
+        ..AddOpts::default()
+    };
+    let plan = engine.inspect(REPO, opts).unwrap();
+    let id = engine.install(plan).unwrap().id;
+    let want = "Unpakt Fixture Upd (fixture-alt)";
+    assert_eq!(name_of(&layout, &id), want);
+
+    publish(&forge, src.path(), "2.0.0");
+    assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+    assert_eq!(name_of(&layout, &id), want);
+    assert_eq!(engine.rollback(&id).unwrap(), "1.0.0");
+    assert_eq!(name_of(&layout, &id), want);
+    assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+    assert_eq!(name_of(&layout, &id), want);
+    validate(&layout.applications.join(format!("unpakt-{id}.desktop")));
+}

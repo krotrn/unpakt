@@ -72,6 +72,17 @@ class GetScriptTests(unittest.TestCase):
         self.assertNotIn("apt-get", " ".join(commands))
         self.assertIn("download and verify unpakt-VERSION-x86_64-linux-musl", commands)
 
+    def test_source_installs_build_dependencies_then_runs_install_sh(self):
+        commands = self.dry_run("ID=fedora\n", "--source", display=True)
+        self.assertIn("sudo dnf install -y gcc pkgconf-pkg-config gtk4-devel libadwaita-devel", commands)
+        self.assertEqual(commands[-1], "bash unpakt-VERSION/install.sh")
+
+    def test_source_without_the_desktop_app_skips_gtk(self):
+        commands = self.dry_run("ID=ubuntu\n", "--source", "--cli-only")
+        self.assertIn("sudo apt-get install -y build-essential pkg-config curl ca-certificates", commands)
+        self.assertNotIn("libgtk-4-dev", " ".join(commands))
+        self.assertEqual(commands[-1], "bash unpakt-VERSION/install.sh --cli-only")
+
     def test_unknown_option_fails(self):
         result = subprocess.run(["sh", str(GET), "--bogus"], capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 1)

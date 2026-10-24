@@ -16,6 +16,9 @@
 #
 #   --cli-only   install only the command line
 #   --gui        install the desktop app even without a graphical session
+#   --source     build the latest release from source into /usr/local with
+#                its install.sh (needs Rust 1.93+; installs the GTK
+#                development packages with your package manager)
 #   --dry-run    print the commands instead of running them
 #
 # Running it again updates unpakt.
@@ -30,6 +33,7 @@ MIN_GLIBC=2.39                                     # what the .deb and AppImage 
 
 DRY_RUN=0
 GUI=auto
+SOURCE=0
 SUDO=
 TMP=
 
@@ -37,7 +41,7 @@ say() { printf '  %s  %s\n' "$1" "$2"; }
 die() { say "✘" "$*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,21s/^# \{0,1\}//p' "$0" 2>/dev/null || echo "See https://github.com/$REPO#install"
+    sed -n '2,24s/^# \{0,1\}//p' "$0" 2>/dev/null || echo "See https://github.com/$REPO#install"
 }
 
 run() {  # run <command...>: run it, or print it with --dry-run
@@ -105,11 +109,13 @@ download() {  # download <asset>: fetch it into $TMP and check it against SHA256
 
 # ── Detection ────────────────────────────────────────────────────────────────
 
-family() {  # arch | debian | other
+family() {  # arch | debian | fedora | suse | other
     for id in ${ID:-} ${ID_LIKE:-}; do
         case $id in
             arch | archarm | manjaro* | endeavouros | cachyos) echo arch; return ;;
             debian | ubuntu | raspbian) echo debian; return ;;
+            fedora | rhel | centos) echo fedora; return ;;
+            opensuse* | suse | sles) echo suse; return ;;
         esac
     done
     echo other
@@ -255,6 +261,53 @@ install_completions() {  # the packages ship completions; the AppImage and CLI r
     done
 }
 
+source_deps() {  # source_deps <family>: the build dependencies from the distribution
+    case $1 in
+        arch) set -- "base-devel pkgconf" "gtk4 libadwaita" pacman -Sy --needed --noconfirm ;;
+        debian)
+            need_root
+            as_root apt-get update
+            set -- "build-essential pkg-config curl ca-certificates" "libgtk-4-dev libadwaita-1-dev" apt-get install -y
+            ;;
+        fedora) set -- "gcc pkgconf-pkg-config" "gtk4-devel libadwaita-devel" dnf install -y ;;
+        suse) set -- "gcc pkgconf" "gtk4-devel libadwaita-devel" zypper --non-interactive install ;;
+        *)
+            say "!" "Install a C compiler and pkg-config, and for the desktop app the GTK 4 and libadwaita development packages, yourself"
+            return
+            ;;
+    esac
+    base=$1 gui=$2
+    shift 2
+    want_gui || gui=
+    need_root
+    # shellcheck disable=SC2086  # the package lists are word lists
+    as_root "$@" $base $gui
+}
+
+source_install() {  # the latest release's source tree, built and installed by its install.sh
+    if [ "$DRY_RUN" = 0 ] && ! command -v cargo >/dev/null 2>&1; then
+        die "Building from source needs Rust 1.93 or newer: install it from https://rustup.rs and run this again."
+    fi
+    source_deps "$1"
+    bin=$(release_asset '^unpakt-.*-x86_64-linux-musl$' unpakt-VERSION-x86_64-linux-musl) ||
+        die "Could not reach the latest release on GitHub."
+    version=${bin#unpakt-}
+    version=${version%-x86_64-linux-musl}
+    [ -n "$version" ] || die "Could not find the latest release."
+    set --
+    want_gui || set -- --cli-only
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "+ download https://github.com/$REPO/archive/refs/tags/v$version.tar.gz"
+        run bash "unpakt-$version/install.sh" "$@"
+        return
+    fi
+    fetch "https://github.com/$REPO/archive/refs/tags/v$version.tar.gz" "$TMP/source.tar.gz" ||
+        die "Could not download the unpakt $version source."
+    tar -xzf "$TMP/source.tar.gz" -C "$TMP"
+    # install.sh builds as this user and uses sudo only to write into /usr/local.
+    run bash "$TMP/unpakt-$version/install.sh" "$@"
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -262,6 +315,7 @@ main() {
         case $arg in
             --cli-only | --no-gui) GUI=no ;;
             --gui) GUI=yes ;;
+            --source) SOURCE=1 ;;
             --dry-run) DRY_RUN=1 ;;
             -h | --help) usage; exit 0 ;;
             *) die "Unknown option: $arg (see --help)" ;;
@@ -277,6 +331,13 @@ main() {
     fi
     distro=$(family)
     [ "$DRY_RUN" = 1 ] || tmpdir
+
+    if [ "$SOURCE" = 1 ]; then
+        if want_gui; then gui_note="with the desktop app"; else gui_note="command line only"; fi
+        say "→" "Building unpakt from source for ${PRETTY_NAME:-$distro} ($gui_note)"
+        source_install "$distro"
+        return
+    fi
 
     if want_gui && ! desktop_can_run; then
         say "!" "The desktop app needs glibc $MIN_GLIBC or newer; installing the command line only"

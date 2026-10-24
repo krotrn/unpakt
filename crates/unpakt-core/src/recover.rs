@@ -110,11 +110,24 @@ fn check_paths(layout: &Layout, steps: &[Undo]) -> std::result::Result<(), Strin
         }
         Ok(())
     };
+    // Steps that replace or delete recursively must name something inside a
+    // managed root, never the root itself.
+    let below = |p: &Path| -> std::result::Result<(), String> {
+        check(p)?;
+        if roots.iter().any(|r| p == r.as_path()) {
+            return Err(format!(
+                "{} is a managed root, not an entry in it",
+                p.display()
+            ));
+        }
+        Ok(())
+    };
     for step in steps {
         match step {
-            Undo::RemoveDir(p) | Undo::RemoveNew(p) => check(p)?,
+            Undo::RemoveDir(p) => check(p)?,
+            Undo::RemoveNew(p) => below(p)?,
             Undo::Restore { orig, backup } => {
-                check(orig)?;
+                below(orig)?;
                 check(backup)?;
                 let named = backup
                     .file_name()
@@ -124,8 +137,8 @@ fn check_paths(layout: &Layout, steps: &[Undo]) -> std::result::Result<(), Strin
                 }
             }
             Undo::Rename { from, to } => {
-                check(from)?;
-                check(to)?;
+                below(from)?;
+                below(to)?;
             }
             Undo::RestoreLink { link, .. } => check(link)?,
         }

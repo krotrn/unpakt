@@ -585,3 +585,80 @@ fn interrupted_install_leaves_no_journal() {
     assert!(matches!(err, Error::Interrupted), "{err:?}");
     assert!(journal_files(engine.layout()).is_empty());
 }
+
+#[test]
+fn journal_naming_a_managed_root_is_refused_and_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine(root.path());
+    let layout = engine.layout().clone();
+    let app = layout.apps.join("keep");
+    std::fs::create_dir_all(&app).unwrap();
+    let remove_root = format!(r#"{{"RemoveNew":"{}"}}"#, layout.apps.display());
+    let rename_root = format!(
+        r#"{{"Rename":{{"from":"{}","to":"{}"}}}}"#,
+        layout.apps.display(),
+        layout.apps.join("moved").display()
+    );
+    let restore_root = format!(
+        r#"{{"Restore":{{"orig":"{}","backup":"{}"}}}}"#,
+        layout.bin.display(),
+        layout.bin.join(".unpakt-bak-1-0-x").display()
+    );
+    for record in [remove_root, rename_root, restore_root] {
+        let path = write_journal(&layout, "1-1.jsonl", &[record]);
+        let err = engine.recover().unwrap_err();
+        assert!(matches!(err, Error::Refused(_)), "{err:?}");
+        assert!(app.exists());
+        assert!(path.exists());
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
+#[test]
+fn cancelled_local_inspect_is_interrupted() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let cancel = Cancel::new();
+    let engine = engine(root.path()).with_cancel(cancel.clone());
+    let tarball = build_tarball(
+        src.path(),
+        "unpakt-fixture-con-1.0.tar.gz",
+        Comp::Gz,
+        &[E::File(
+            "unpakt-fixture-con/bin/unpakt-fixture-con",
+            ELF,
+            0o755,
+        )],
+    );
+    cancel.cancel();
+    let err = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap_err();
+    assert!(matches!(err, Error::Interrupted), "{err:?}");
+    assert!(tarball.exists());
+}
+
+#[test]
+fn cancel_while_waiting_for_the_lock_changes_nothing() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut first = engine(root.path());
+    let id = install_local(&mut first, src.path());
+    let layout = first.layout().clone();
+    let before = tree_snapshot(root.path());
+
+    let held = lock::acquire(&layout.data.join("lock"), || {}).unwrap();
+    let cancel = Cancel::new();
+    let mut second = engine(root.path()).with_cancel(cancel.clone());
+    let handle = {
+        let id = id.clone();
+        std::thread::spawn(move || second.remove(&id))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    cancel.cancel();
+    drop(held);
+    let err = handle.join().unwrap().unwrap_err();
+    assert!(matches!(err, Error::Interrupted), "{err:?}");
+    assert_eq!(first.list().unwrap().len(), 1);
+    assert_eq!(tree_snapshot(root.path()), before);
+}

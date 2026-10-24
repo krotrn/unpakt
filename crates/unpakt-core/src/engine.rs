@@ -291,6 +291,7 @@ impl Engine {
     fn begin(&mut self) -> Result<WriteLock> {
         let lock = self.take_lock()?;
         recover(&lock, &self.layout, &self.manifest)?;
+        self.cancel.check()?;
         Ok(lock)
     }
 
@@ -482,6 +483,7 @@ impl Engine {
             file_name,
         };
         self.emit(Progress::Inspecting);
+        self.cancel.check()?;
         let payload = detect(&artifact)?.inspect(&artifact)?;
         let backend = for_payload(&payload).ok_or_else(|| {
             Error::Unsupported(format!(
@@ -1046,7 +1048,7 @@ impl Engine {
                     name,
                     ok: false,
                     detail: format!(
-                        "unfinished operations are recorded in {}; the next change recovers them",
+                        "unfinished operations are recorded in {}; the next change tries to recover them and is refused until they are repaired or removed",
                         list.join(", ")
                     ),
                 }

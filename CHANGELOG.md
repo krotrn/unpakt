@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- File managers now offer unpakt for AppImages and tarballs (`.tar.gz`,
+  `.tar.xz`, `.tar.zst`, `.tar.bz2`, `.tar`); opening one starts the install
+  review in the desktop app.
+
 ## [0.1.2] - 2026-10-24
 
 ### Fixed

@@ -217,12 +217,16 @@ install_appimage() {  # the latest release's AppImage, with commands and a launc
 Type=Application
 Name=unpakt
 Comment=Install and manage AppImages and tarballs
-Exec=$BIN/unpakt-gui
+Exec=$BIN/unpakt-gui %f
 Icon=io.github.krotrn.Unpakt
+MimeType=application/vnd.appimage;application/x-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-bzip2-compressed-tar;application/x-tar;
 Categories=System;PackageManager;GTK;
 Terminal=false
 StartupNotify=true
 EOF
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q "$SHARE/applications" || true
+    fi
 }
 
 install_cli() {  # the latest release's static command-line binary

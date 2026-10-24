@@ -49,10 +49,18 @@ FILES=(
     "$SHARE/fish/vendor_completions.d/unpakt.fish"
 )
 
+# So file managers offer (or stop offering) unpakt for the types it opens.
+refresh_desktop_db() {
+    if command -v update-desktop-database >/dev/null 2>&1 && [[ -d $SHARE/applications ]]; then
+        as_root update-desktop-database -q "$SHARE/applications" || true
+    fi
+}
+
 uninstall_unpakt() {
     need_write
     as_root rm -f "${FILES[@]}"
     as_root rm -rf "$LIB"
+    refresh_desktop_db
     say "✔" "unpakt removed from $PREFIX (installed apps and their records are kept)"
 }
 
@@ -82,6 +90,7 @@ install_unpakt() {
         # A desktop app left over from an earlier install would be out of date.
         as_root rm -f "${DESKTOP_FILES[@]}"
     fi
+    refresh_desktop_db
     "$target/unpakt" completion bash | as_root install -Dm644 /dev/stdin "$SHARE/bash-completion/completions/unpakt"
     "$target/unpakt" completion zsh | as_root install -Dm644 /dev/stdin "$SHARE/zsh/site-functions/_unpakt"
     "$target/unpakt" completion fish | as_root install -Dm644 /dev/stdin "$SHARE/fish/vendor_completions.d/unpakt.fish"

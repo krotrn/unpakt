@@ -2,6 +2,8 @@ mod output;
 
 use std::io::{BufRead, IsTerminal};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -134,26 +136,52 @@ fn confirm(verb: &str, question: &str) -> Result<()> {
     }
 }
 
-/// Makes SIGINT and SIGTERM stop the running operation cleanly: the first one
+/// Interrupt policy. While nothing is being changed a signal ends the process
+/// at once. While a mutating engine call runs ("armed"), the first signal only
 /// sets the flag the engine polls, so its changes are undone; a second one
 /// exits at once.
-fn cancel_on_signal() -> Cancel {
-    let cancel = Cancel::new();
-    let handler = cancel.clone();
-    let installed = ctrlc::set_handler(move || {
-        if handler.is_cancelled() {
-            std::process::exit(i32::from(EXIT_INTERRUPTED));
-        }
-        handler.cancel();
-    });
-    if let Err(e) = installed {
-        eprintln!("warning: cannot install the interrupt handler: {e}");
+struct Interrupt {
+    cancel: Cancel,
+    armed: Arc<AtomicBool>,
+}
+
+/// Keeps the interrupt policy armed until dropped.
+struct Armed<'a>(&'a AtomicBool);
+
+impl Drop for Armed<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
-    cancel
+}
+
+impl Interrupt {
+    fn install() -> Interrupt {
+        let cancel = Cancel::new();
+        let armed = Arc::new(AtomicBool::new(false));
+        let (handler_cancel, handler_armed) = (cancel.clone(), Arc::clone(&armed));
+        let installed = ctrlc::set_handler(move || {
+            if !handler_armed.load(Ordering::SeqCst) || handler_cancel.is_cancelled() {
+                eprintln!("interrupted");
+                std::process::exit(i32::from(EXIT_INTERRUPTED));
+            }
+            handler_cancel.cancel();
+        });
+        if let Err(e) = installed {
+            eprintln!("warning: cannot install the interrupt handler: {e}");
+        }
+        Interrupt { cancel, armed }
+    }
+
+    /// Arms the policy; call before the engine starts changing anything.
+    fn arm(&self) -> Armed<'_> {
+        self.armed.store(true, Ordering::SeqCst);
+        Armed(&self.armed)
+    }
 }
 
 fn run(command: Command) -> Result<()> {
-    let mut engine = Engine::open_default()?.with_cancel(cancel_on_signal());
+    let interrupt = Interrupt::install();
+    let mut engine = Engine::open_default()?.with_cancel(interrupt.cancel.clone());
     match command {
         Command::Add {
             input,
@@ -187,6 +215,7 @@ fn run(command: Command) -> Result<()> {
                 engine.discard(plan);
                 return Err(e);
             }
+            let _armed = interrupt.arm();
             let app = engine.install(plan)?;
             println!("installed {} {}", app.id, app.current);
         }
@@ -205,6 +234,7 @@ fn run(command: Command) -> Result<()> {
             if !yes {
                 confirm("remove", &format!("Remove {id}?"))?;
             }
+            let _armed = interrupt.arm();
             engine.remove(&id)?;
             println!("removed {id}");
         }
@@ -214,10 +244,12 @@ fn run(command: Command) -> Result<()> {
                 output::print_updates(&found.updates);
                 report_failed_checks(&found.failed)?;
             } else {
+                let _armed = interrupt.arm();
                 update_apps(&mut engine, id.as_deref())?;
             }
         }
         Command::Rollback { id } => {
+            let _armed = interrupt.arm();
             let label = engine.rollback(&id)?;
             println!("{label}");
         }

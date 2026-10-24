@@ -17,5 +17,6 @@ unpakt-core = { version = "0.1.0", path = "../unpakt-core" }
 
 [dev-dependencies]
 flate2 = "1.1.10"
+libc = "0.2.191"
 tar = "0.4.46"
 tempfile = "3.27.0"

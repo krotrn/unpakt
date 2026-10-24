@@ -179,6 +179,31 @@ impl Model {
             return Effect::None;
         }
 
+        // A successful change is followed by `Event::Apps` with the fresh list.
+        // Stay busy until that arrives so no new operation can start in between,
+        // unless the window is closing, which needs no further events.
+        if matches!(self.busy, Busy::Working { .. })
+            && matches!(
+                e,
+                Event::Installed(_)
+                    | Event::Updated { .. }
+                    | Event::RolledBack { .. }
+                    | Event::Removed { .. }
+            )
+        {
+            if self.close_requested {
+                self.busy = Busy::Idle;
+                self.cancel = None;
+                return Effect::Close;
+            }
+            return match e {
+                Event::Installed(app) => {
+                    Effect::Toast(format!("Installed {} {}", app.name, app.current))
+                }
+                _ => Effect::None,
+            };
+        }
+
         let was_working = matches!(self.busy, Busy::Working { .. });
         self.busy = Busy::Idle;
         self.cancel = None;
@@ -204,14 +229,20 @@ impl Model {
         }
     }
 
+    /// Cancels the running operation, if any. The worker then reports the
+    /// outcome as usual.
+    pub fn cancel_op(&self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+    }
+
     /// Returns `true` when the window may close now. While an operation runs,
     /// it is cancelled instead and the close waits for its final event.
     pub fn request_close(&mut self) -> bool {
         if let Busy::Working { .. } = self.busy {
             self.close_requested = true;
-            if let Some(cancel) = &self.cancel {
-                cancel.cancel();
-            }
+            self.cancel_op();
             false
         } else {
             true
@@ -472,6 +503,28 @@ mod tests {
             m.on_event(&Event::Installed(app("a", "A", "1.0"))),
             Effect::Close
         );
+    }
+
+    #[test]
+    fn stays_busy_until_the_fresh_list_arrives() {
+        let mut m = Model::default();
+        m.start(Op::Install);
+        assert_eq!(
+            m.on_event(&Event::Installed(app("a", "A", "1.0"))),
+            Effect::Toast("Installed A 1.0".into())
+        );
+        assert!(matches!(m.busy, Busy::Working { .. }));
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn cancel_op_cancels_without_closing() {
+        let mut m = Model::default();
+        let c = m.start(Op::Inspect);
+        m.cancel_op();
+        assert!(c.is_cancelled());
+        assert!(!m.close_requested);
     }
 
     #[test]

@@ -167,3 +167,73 @@ fn reads_never_wait_for_the_lock() {
     engine.check_updates(None).unwrap();
     assert!(start.elapsed() < Duration::from_secs(1));
 }
+
+#[test]
+fn update_keeps_versions_recorded_while_it_waited() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let make = |progress: Option<ProgressFn>| {
+        let engine = engine(root.path()).with_http(Http::new(&forge.api_url(), None).unwrap());
+        match progress {
+            Some(f) => engine.with_progress(f),
+            None => engine,
+        }
+    };
+
+    let mut setup = make(None);
+    publish(&forge, src.path(), "1.0.0");
+    let plan = setup.inspect(REPO, AddOpts::default()).unwrap();
+    let id = setup.install(plan).unwrap().id;
+    publish(&forge, src.path(), "3.0.0");
+    let layout = setup.layout().clone();
+    let (app, versions, files) = setup.get(&id).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let f: ProgressFn = Arc::new(move |p| {
+        if p == Progress::WaitingForLock {
+            let _ = tx.send(());
+        }
+    });
+    let mut engine_a = make(Some(f));
+    let held = lock::acquire(&layout.data.join("lock"), || {}).unwrap();
+    let handle = {
+        let id = id.clone();
+        std::thread::spawn(move || engine_a.update(&id))
+    };
+    rx.recv_timeout(Duration::from_secs(20)).unwrap();
+
+    // Another process installs 2.0 and rolls back to 1.0: `current` is
+    // unchanged but a version the waiting update never saw is now recorded.
+    let v2_dir = layout.apps.join(&id).join("2.0.0");
+    std::fs::create_dir(&v2_dir).unwrap();
+    std::fs::write(v2_dir.join("marker"), b"keep").unwrap();
+    let mut manifest = Manifest::open(&layout.db).unwrap();
+    let v2 = unpakt_core::manifest::VersionRecord {
+        label: "2.0.0".into(),
+        version: Some("2.0.0".into()),
+        ..versions[0].clone()
+    };
+    let as_v2 = unpakt_core::manifest::AppRecord {
+        current: "2.0.0".into(),
+        ..app.clone()
+    };
+    manifest
+        .commit_install_with(&as_v2, &v2, &files, &[], &[])
+        .unwrap();
+    manifest.set_current(&id, "1.0.0", &files).unwrap();
+    drop(manifest);
+    drop(held);
+
+    assert_eq!(handle.join().unwrap().unwrap(), Some("3.0.0".into()));
+    assert!(
+        v2_dir.join("marker").is_file(),
+        "recorded 2.0.0 was deleted"
+    );
+    let (_, after, _) = setup.get(&id).unwrap();
+    let labels: Vec<&str> = after.iter().map(|v| v.label.as_str()).collect();
+    assert!(
+        labels.contains(&"2.0.0") && labels.contains(&"3.0.0"),
+        "{labels:?}"
+    );
+}

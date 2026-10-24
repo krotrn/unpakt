@@ -183,6 +183,11 @@ impl Manifest {
     }
 
     fn init(conn: Connection) -> Result<Manifest> {
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        if conn.path().is_some_and(|p| !p.is_empty()) {
+            // Readers keep working while another process writes.
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
         conn.pragma_update(None, "foreign_keys", true)?;
         let found: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if found > SCHEMA_VERSION {
@@ -396,6 +401,17 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_manifest_uses_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::open(&dir.path().join("db.sqlite")).unwrap();
+        let mode: String = m
+            .conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+    }
 
     fn app(id: &str, current: &str) -> AppRecord {
         AppRecord {

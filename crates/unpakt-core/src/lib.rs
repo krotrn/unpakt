@@ -7,6 +7,7 @@ pub mod format;
 pub mod host;
 pub mod http;
 pub mod integrate;
+pub mod lock;
 pub mod manifest;
 pub mod model;
 pub mod naming;

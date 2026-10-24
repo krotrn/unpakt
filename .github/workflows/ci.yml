@@ -45,7 +45,7 @@ jobs:
 
       # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5, the oldest versions the GUI supports.
       - name: Install GTK and libadwaita
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev desktop-file-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev desktop-file-utils appstream
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -60,6 +60,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Desktop entry and metainfo
+        run: |
+          desktop-file-validate data/io.github.krotrn.Unpakt.desktop
+          appstreamcli validate --no-net data/io.github.krotrn.Unpakt.metainfo.xml
 
       - name: Core stays free of GUI dependencies
         run: |

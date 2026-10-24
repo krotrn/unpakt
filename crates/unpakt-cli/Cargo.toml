@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Install, update and roll back AppImages and tarballs per user"
+readme = "../../README.md"
+keywords = ["appimage", "installer", "linux", "package-manager"]
+categories = ["command-line-utilities"]
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [[bin]]
 name = "unpakt"

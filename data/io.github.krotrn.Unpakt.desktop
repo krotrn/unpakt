@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=unpakt
+Comment=Install and manage AppImages and tarballs per user
+Exec=unpakt-gui %U
+Icon=io.github.krotrn.Unpakt
+Categories=System;PackageManager;GTK;
+MimeType=application/vnd.appimage;application/x-iso9660-appimage;
+Terminal=false
+StartupNotify=true

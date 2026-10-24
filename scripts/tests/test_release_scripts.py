@@ -79,6 +79,15 @@ class ReleaseScripts(unittest.TestCase):
         self.assertEqual(self.read(METAINFO).count('version="0.1.0"'), 1)
         self.assertIn("pkgrel=1", self.read("packaging/arch/PKGBUILD"))
 
+    def test_bump_refreshes_existing_release_date(self):
+        path = self.root / METAINFO
+        path.write_text(self.read(METAINFO).replace('date="2026-10-24"', 'date="2020-01-01"'), encoding="utf-8")
+        self.assertEqual(self.bump("0.1.0", self.root), 0)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        meta = self.read(METAINFO)
+        self.assertIn(f'<release version="0.1.0" date="{today}"/>', meta)
+        self.assertEqual(meta.count("<release "), 1)
+
     def test_bump_new_version_updates_every_source(self):
         self.assertEqual(self.bump("0.2.0", self.root), 0)
         self.assertEqual(set(check.versions(self.root).values()), {"0.2.0"})
@@ -112,7 +121,7 @@ class ReleaseScripts(unittest.TestCase):
 
     def test_bump_rejects_bad_version(self):
         before = self.snapshot()
-        for bad in ("v0.2", "0.2.0\n", "0.2.0..", "0.2.0-", "0.2"):
+        for bad in ("v0.2", "0.2.0\n", "0.2.0..", "0.2.0-", "0.2.0-rc.1", "0.2"):
             self.assertEqual(self.bump(bad, self.root), 2, bad)
         self.assertEqual(self.snapshot(), before)
 

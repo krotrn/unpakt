@@ -34,8 +34,9 @@ def replace_group(text: str, pattern: str, value: str) -> str | None:
 
 def add_metainfo_release(text: str, new_version: str, today: str) -> str | None:
     """Add ``<release version="X.Y.Z" date="DATE"/>`` before the existing releases."""
-    if f'<release version="{new_version}"' in text:
-        return text  # already listed
+    listed = re.compile(rf'(<release version="{re.escape(new_version)}"[^>]*?date=")[^"]*(")')
+    if listed.search(text):
+        return listed.sub(rf"\g<1>{today}\g<2>", text, count=1)  # already listed: refresh its date
     match = re.search(r"^([ \t]*)<releases>\n", text, re.MULTILINE)
     if not match:
         return None
@@ -53,7 +54,7 @@ def release_changelog(text: str, new_version: str, today: str) -> str | None:
 
 
 def bump_version(new_version: str, root: Path = ROOT) -> int:
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", new_version):
+    if not re.fullmatch(r"\d+\.\d+\.\d+", new_version):
         print(f"Invalid version: {new_version}")
         return 2
 

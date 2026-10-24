@@ -253,7 +253,7 @@ jobs:
           - name: openSUSE Tumbleweed
             image: opensuse/tumbleweed
             install: >-
-              zypper --non-interactive install python3 xorg-x11-server-Xvfb xwininfo dbus-1
+              zypper --non-interactive install python3 xorg-x11-server-Xvfb xwininfo dbus-1-daemon
               ImageMagick dejavu-fonts libX11-6 libxcb1 libfontconfig1 libfreetype6 libharfbuzz0
               libfribidi0 libwayland-client0
           - name: Arch Linux

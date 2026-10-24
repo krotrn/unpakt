@@ -458,3 +458,34 @@ fn rollback_restores_script_wrapper_and_update_restores_symlink() {
             .contains("echo one")
     );
 }
+
+#[test]
+fn forced_shadowed_command_survives_update_and_rollback() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let layout = Layout::under(root.path());
+    let other = root.path().join("other-bin");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("unpakt-fixture-upd"), "system tool").unwrap();
+    let path_var = std::env::join_paths([&other, &layout.bin]).unwrap();
+    let mut engine = Engine::new(layout.clone(), Host::detect())
+        .unwrap()
+        .with_path_var(path_var)
+        .with_http(Http::new(&forge.api_url(), None).unwrap());
+
+    publish(&forge, src.path(), "1.0.0");
+    let plain = engine.inspect(REPO, AddOpts::default()).unwrap();
+    assert!(matches!(engine.install(plain), Err(Error::Conflict(_))));
+    let forced = AddOpts {
+        force: true,
+        ..AddOpts::default()
+    };
+    let plan = engine.inspect(REPO, forced).unwrap();
+    let id = engine.install(plan).unwrap().id;
+
+    publish(&forge, src.path(), "2.0.0");
+    assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+    assert_eq!(engine.rollback(&id).unwrap(), "1.0.0");
+    assert_eq!(engine.get(&id).unwrap().0.current, "1.0.0");
+}

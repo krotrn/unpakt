@@ -182,7 +182,9 @@ pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<I
     let bin_path = req.command.map(|c| layout.bin.join(c));
 
     // Refuse before touching anything.
-    if let (Some(command), false) = (req.command, req.force)
+    // A command the app already owns was accepted when it was first added.
+    let owns_bin = bin_path.as_deref().is_some_and(|p| is_owned(req.owned, p));
+    if let (Some(command), false) = (req.command, req.force || owns_bin)
         && let Some(dir) = find_shadow(command, req.path_var, &layout.bin)
     {
         return Err(Error::Conflict(format!(

@@ -1,0 +1,182 @@
+name: Packages
+
+# Builds the Arch package, the Debian/Ubuntu package and the AppImage, and
+# checks that they install and run. Runs on pull requests and main, and is
+# called by release.yml, which publishes the artifacts built here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  arch:
+    name: Build Arch package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git pacman-contrib rust gtk4 libadwaita
+          useradd -m builder
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          chown -R builder "$GITHUB_WORKSPACE"
+          mode=local
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then mode=release; fi
+          sudo -u builder --preserve-env=GITHUB_REF_NAME packaging/arch/ci-build.sh "$mode"
+
+      - name: Install and smoke test
+        run: |
+          pacman -U --noconfirm packaging/arch/out/*.pkg.tar.zst
+          unpakt --version
+          test -x /usr/bin/unpakt-gui
+          test -f /usr/share/applications/io.github.krotrn.Unpakt.desktop
+          test -f /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
+          test -f /usr/share/icons/hicolor/scalable/apps/io.github.krotrn.Unpakt.svg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: arch-package
+          include-hidden-files: true
+          if-no-files-found: error
+          path: |
+            packaging/arch/out/*.pkg.tar.zst
+            packaging/arch/out/PKGBUILD
+            packaging/arch/out/.SRCINFO
+
+  deb:
+    name: Build Debian/Ubuntu package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Built on the oldest supported LTS (GTK 4.14, libadwaita 1.5).
+    container: ubuntu:24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential dpkg-dev pkg-config libgtk-4-dev libadwaita-1-dev gzip \
+            lintian git curl ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/deb/build.sh
+
+      - name: Lintian
+        run: lintian --info --display-info --fail-on error packaging/deb/out/*.deb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-package
+          if-no-files-found: error
+          path: packaging/deb/out/*.deb
+
+  deb-install:
+    name: Install .deb on ${{ matrix.image }}
+    needs: deb
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "ubuntu:26.04", "debian:13"]
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v8
+        with:
+          name: deb-package
+          path: deb
+
+      - name: Install and smoke test
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ./deb/*.deb
+          unpakt --version
+          test -x /usr/bin/unpakt-gui
+          if ldd /usr/bin/unpakt-gui | grep 'not found'; then
+            echo "::error::unpakt-gui has unresolved libraries on ${{ matrix.image }}"
+            exit 1
+          fi
+
+  appimage:
+    name: Build AppImage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: ubuntu:24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential dpkg-dev pkg-config curl file patchelf git \
+            desktop-file-utils libgtk-4-dev libadwaita-1-dev librsvg2-common \
+            libglib2.0-bin shared-mime-info ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          packaging/appimage/build.sh
+
+      # The container has no FUSE, so run the image by extracting it.
+      - name: Smoke test
+        run: |
+          image=$(echo packaging/appimage/out/*.AppImage)
+          chmod +x "$image"
+          "$image" --appimage-extract-and-run cli --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: appimage
+          if-no-files-found: error
+          path: packaging/appimage/out/*.AppImage

@@ -35,6 +35,9 @@ jobs:
         with:
           args: -color
 
+      - name: Shell scripts (shellcheck)
+        run: shellcheck packaging/*/*.sh packaging/appimage/AppRun
+
       - name: Release script tests
         run: python3 -m unittest discover -s scripts/tests -v
 

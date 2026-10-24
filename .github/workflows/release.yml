@@ -1,0 +1,301 @@
+name: Release
+
+# One pipeline for a tagged release, publishing only after everything passed:
+#
+#   verify ──► ci (lint, tests, MSRV, static CLI) ──┐
+#          └─► packages (Arch, .deb, AppImage) ─────┴─► attest (checksums, signature, provenance)
+#                                                         ├─► GitHub release (notes from CHANGELOG.md)
+#                                                         ├─► pacman repo ("arch-repo" release)
+#                                                         ├─► AUR        (needs AUR_SSH_PRIVATE_KEY)
+#                                                         └─► crates.io  (needs CARGO_REGISTRY_TOKEN or trusted publishing)
+#
+# Start it with the "Version Bump" workflow, or push a vX.Y.Z tag yourself.
+# Jobs that need a secret finish green with a notice when it is not configured.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify version and changelog
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Versions agree with the tag
+        id: version
+        run: |
+          if [[ $GITHUB_REF != refs/tags/v* ]]; then
+            echo "::error::Run this workflow on a vX.Y.Z tag (Version Bump does that)."
+            exit 1
+          fi
+          python3 scripts/release_check.py "${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  packages:
+    needs: verify
+    uses: ./.github/workflows/packages.yml
+
+  attest:
+    name: Collect and attest artifacts
+    needs: [verify, ci, packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Gather release files
+        run: |
+          mkdir release
+          cp artifacts/unpakt-x86_64-linux-musl/unpakt "release/unpakt-$VERSION-x86_64-linux-musl"
+          cp artifacts/appimage/*.AppImage "release/unpakt-$VERSION-x86_64.AppImage"
+          cp artifacts/deb-package/*.deb artifacts/arch-package/*.pkg.tar.zst release/
+          chmod +x "release/unpakt-$VERSION-x86_64-linux-musl" "release/unpakt-$VERSION-x86_64.AppImage"
+          (cd release && sha256sum -- * > SHA256SUMS)
+          ls -l release
+
+      - name: Sign checksums
+        if: env.MINISIGN_SECRET_KEY != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+          key="$RUNNER_TEMP/minisign.key"
+          (umask 077; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          cd release
+          if [[ -n $MINISIGN_PASSWORD ]]; then
+            printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$key" -m SHA256SUMS -t "unpakt $VERSION"
+          else
+            minisign -W -S -s "$key" -m SHA256SUMS -t "unpakt $VERSION"
+          fi
+          rm -f "$key"
+          ls -l SHA256SUMS.minisig
+
+      - name: Note unsigned checksums
+        if: env.MINISIGN_SECRET_KEY == ''
+        run: echo "::notice::MINISIGN_SECRET_KEY not set; SHA256SUMS is not signed"
+
+      - name: Build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release/*
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-files
+          path: release/
+          if-no-files-found: error
+
+  github-release:
+    name: GitHub release
+    needs: [verify, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download release files
+        uses: actions/download-artifact@v8
+        with:
+          name: release-files
+          path: release
+
+      - name: Create or update the release
+        run: |
+          python3 scripts/release_notes.py "$VERSION" > notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" release/* --verify-tag \
+              --title "unpakt $VERSION" --notes-file notes.md
+          fi
+
+  arch-repo:
+    name: Publish pacman repository
+    needs: [verify, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+    concurrency:
+      group: arch-repo
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GPG_PRIVATE_KEY: ${{ secrets.ARCH_GPG_PRIVATE_KEY }}
+      REPO_RELEASE: arch-repo
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git github-cli
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download package
+        uses: actions/download-artifact@v8
+        with:
+          name: arch-package
+          path: repo
+
+      - name: Build repository database
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          rm -f repo/PKGBUILD repo/.SRCINFO
+          if [[ -n $GPG_PRIVATE_KEY ]]; then
+            printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
+            GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+            export GPG_KEY_ID
+          else
+            echo "::notice::ARCH_GPG_PRIVATE_KEY not set; publishing an unsigned repository"
+          fi
+          packaging/arch/ci-repo.sh repo
+
+      - name: Upload to the arch-repo release
+        run: |
+          gh_repo=(--repo "$GITHUB_REPOSITORY")
+          if ! gh release view "$REPO_RELEASE" "${gh_repo[@]}" >/dev/null 2>&1; then
+            gh release create "$REPO_RELEASE" "${gh_repo[@]}" --latest=false \
+              --title "Arch Linux repository" \
+              --notes "pacman repository for unpakt. Setup: see the README."
+          fi
+          cd repo
+          gh release upload "$REPO_RELEASE" ./* --clobber "${gh_repo[@]}"
+          # Drop assets from older versions so the repo only serves the current package.
+          gh release view "$REPO_RELEASE" "${gh_repo[@]}" --json assets -q '.assets[].name' |
+            while read -r asset; do
+              if [[ ! -e $asset ]]; then
+                gh release delete-asset "$REPO_RELEASE" "$asset" -y "${gh_repo[@]}"
+              fi
+            done
+
+  aur:
+    name: Publish to AUR
+    needs: [verify, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Skip without AUR key
+        if: env.AUR_SSH_PRIVATE_KEY == ''
+        run: echo "::notice::AUR_SSH_PRIVATE_KEY not set; skipping AUR publish"
+
+      - name: Download PKGBUILD
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: arch-package
+          path: arch
+
+      - name: Push to aur.archlinux.org
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes"
+
+          git clone ssh://aur@aur.archlinux.org/unpakt.git aur
+          cp arch/PKGBUILD arch/.SRCINFO aur/
+          cd aur
+          # Commit as the PKGBUILD maintainer ("# Maintainer: name <email>").
+          maintainer=$(sed -n 's/^# Maintainer: //p' PKGBUILD)
+          email=${maintainer##*<}
+          git config user.name "${maintainer% <*}"
+          git config user.email "${email%>}"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR already up to date"
+          else
+            git commit -m "Update to ${GITHUB_REF_NAME#v}"
+            git push origin HEAD:master
+          fi
+
+  crates-io:
+    name: Publish to crates.io
+    needs: [verify, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write  # trusted publishing; no API token stored in the repo
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      TRUSTED: ${{ vars.CRATES_IO_TRUSTED_PUBLISHING }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Skip without crates.io credentials
+        if: env.CARGO_REGISTRY_TOKEN == '' && env.TRUSTED != 'true'
+        run: echo "::notice::CARGO_REGISTRY_TOKEN not set and CRATES_IO_TRUSTED_PUBLISHING is not 'true'; skipping crates.io publish"
+
+      - name: Checkout
+        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        uses: actions/checkout@v7
+
+      - name: Authenticate with crates.io
+        id: auth
+        if: env.TRUSTED == 'true'
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Install GTK and libadwaita
+        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev
+
+      - name: Set up Rust
+        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        env:
+          TRUSTED_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          if [[ $TRUSTED == true && -n $TRUSTED_TOKEN ]]; then
+            export CARGO_REGISTRY_TOKEN=$TRUSTED_TOKEN
+          fi
+          for crate in unpakt-core unpakt-cli; do
+            if curl -fsS -A unpakt-release "https://crates.io/api/v1/crates/$crate/$VERSION" >/dev/null; then
+              echo "::notice::$crate $VERSION is already on crates.io; skipping"
+              continue
+            fi
+            cargo publish --locked -p "$crate"
+          done

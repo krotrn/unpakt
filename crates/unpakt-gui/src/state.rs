@@ -1,11 +1,13 @@
+use std::path::Path;
+
 use percent_encoding::percent_decode_str;
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
-use unpakt_core::engine::{InstallPlan, UpdateInfo};
+use unpakt_core::engine::{AddOpts, InstallPlan, UpdateInfo};
 use unpakt_core::manifest::AppRecord;
 use unpakt_core::progress::Progress;
 
-use crate::worker::{Event, Op};
+use crate::worker::{Cmd, Event, Op};
 
 /// Turns pasted or typed input into the URL or path it names. Surrounding
 /// whitespace is dropped, `file://` URIs are decoded to a path, and empty
@@ -131,6 +133,8 @@ pub struct Model {
     cancel: Option<Cancel>,
     /// A change succeeded and its fresh list has not arrived yet.
     list_pending: bool,
+    /// The last inspected input and its options, for retries.
+    last_inspect: Option<(String, AddOpts)>,
 }
 
 /// What the view must do after an event.
@@ -142,6 +146,11 @@ pub enum Effect {
         title: String,
         body: String,
         inspect_again: bool,
+    },
+    /// The install failed because the command name is taken on the system.
+    OfferWithoutCommand {
+        title: String,
+        body: String,
     },
     Toast(String),
     Close,
@@ -160,6 +169,42 @@ impl Model {
         self.cancel = Some(cancel.clone());
         self.list_pending = false;
         cancel
+    }
+
+    /// Starts inspecting `input` and returns the command to send. The caller
+    /// checks that nothing else is running.
+    pub fn inspect(&mut self, input: String) -> Cmd {
+        self.inspect_with(input, AddOpts::default())
+    }
+
+    /// Inspects the last input again with the same options.
+    pub fn inspect_again(&mut self) -> Option<Cmd> {
+        let (input, opts) = self.last_inspect.clone()?;
+        self.idle().then(|| self.inspect_with(input, opts))
+    }
+
+    /// Inspects the last input again, leaving out the command.
+    pub fn inspect_without_command(&mut self) -> Option<Cmd> {
+        let (input, opts) = self.last_inspect.clone()?;
+        let opts = AddOpts {
+            no_bin: true,
+            ..opts
+        };
+        self.idle().then(|| self.inspect_with(input, opts))
+    }
+
+    fn idle(&self) -> bool {
+        self.busy == Busy::Idle
+    }
+
+    fn inspect_with(&mut self, input: String, opts: AddOpts) -> Cmd {
+        self.last_inspect = Some((input.clone(), opts.clone()));
+        let cancel = self.start(Op::Inspect);
+        Cmd::Inspect {
+            input,
+            opts,
+            cancel,
+        }
     }
 
     /// Applies one worker event to the state and says what the view must do.
@@ -248,6 +293,13 @@ impl Model {
                 error: Error::Interrupted,
                 ..
             } => Effect::Toast("Cancelled".into()),
+            Event::Failed {
+                op: Op::Install,
+                error: Error::Shadowed { command, by },
+            } => Effect::OfferWithoutCommand {
+                title: "Command already exists".into(),
+                body: shadowed_body(command, by),
+            },
             Event::Failed { op, error } => Effect::ShowError {
                 title: failure_title(*op).into(),
                 body: failure_body(error),
@@ -311,6 +363,14 @@ fn failure_body(error: &Error) -> String {
     }
 }
 
+fn shadowed_body(command: &str, by: &Path) -> String {
+    let dir = by.parent().unwrap_or(by).display();
+    format!(
+        "`{command}` is already provided by {dir}. Install without adding the `{command}` \
+         command? The app still gets its launcher entry."
+    )
+}
+
 fn failure_title(op: Op) -> &'static str {
     match op {
         Op::Inspect => "Could not read this input",
@@ -332,7 +392,7 @@ mod tests {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use unpakt_core::Layout;
-    use unpakt_core::engine::{AddOpts, Engine};
+    use unpakt_core::engine::Engine;
     use unpakt_core::host::Host;
     use unpakt_core::manifest::AppRecord;
     use unpakt_core::model::{FormatKind, SourceCfg, SourceKind};
@@ -445,6 +505,8 @@ mod tests {
         let rows = review_rows(&plan);
         assert_eq!(rows[1].1, format!("{} (1.0.3-rc)", plan.plan.label));
         assert_eq!(rows[6].1, "unpakt-fixture-tool --run");
+        plan.command = None;
+        assert_eq!(review_rows(&plan)[6].1, "none");
         assert_eq!(rows[7], ("Launcher entry", "yes".to_string()));
     }
 
@@ -704,5 +766,96 @@ mod tests {
             m.start(op);
             assert!(m.busy.cancellable(), "{op:?}");
         }
+    }
+
+    fn shadowed() -> Error {
+        Error::Shadowed {
+            command: "nvim".into(),
+            by: PathBuf::from("/usr/bin/nvim"),
+        }
+    }
+
+    #[test]
+    fn shadowed_install_offers_install_without_command() {
+        let mut m = Model::default();
+        m.start(Op::Install);
+        let effect = m.on_event(&Event::Failed {
+            op: Op::Install,
+            error: shadowed(),
+        });
+        let Effect::OfferWithoutCommand { title, body } = effect else {
+            panic!("expected the shadowed-command dialog, got {effect:?}");
+        };
+        assert_eq!(title, "Command already exists");
+        assert_eq!(
+            body,
+            "`nvim` is already provided by /usr/bin. Install without adding the `nvim` command? \
+             The app still gets its launcher entry."
+        );
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn shadowed_elsewhere_is_a_plain_error() {
+        let mut m = Model::default();
+        m.start(Op::Update);
+        let effect = m.on_event(&Event::Failed {
+            op: Op::Update,
+            error: shadowed(),
+        });
+        assert!(matches!(
+            effect,
+            Effect::ShowError {
+                inspect_again: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn inspect_without_command_reuses_the_input() {
+        let mut m = Model::default();
+        let Cmd::Inspect { input, opts, .. } = m.inspect("https://github.com/o/r".into()) else {
+            panic!("expected an inspect command");
+        };
+        assert_eq!(input, "https://github.com/o/r");
+        assert!(!opts.no_bin);
+        m.on_event(&Event::Failed {
+            op: Op::Install,
+            error: shadowed(),
+        });
+        let Some(Cmd::Inspect { input, opts, .. }) = m.inspect_without_command() else {
+            panic!("expected an inspect command");
+        };
+        assert_eq!(input, "https://github.com/o/r");
+        assert!(opts.no_bin);
+        assert!(matches!(m.busy, Busy::Working { op: Op::Inspect, .. }));
+    }
+
+    #[test]
+    fn inspect_without_command_needs_a_stored_input_and_idle() {
+        let mut m = Model::default();
+        assert!(m.inspect_without_command().is_none());
+        m.inspect("x".into());
+        assert!(m.inspect_without_command().is_none());
+    }
+
+    #[test]
+    fn inspect_again_keeps_the_options() {
+        let mut m = Model::default();
+        m.inspect("x".into());
+        m.on_event(&Event::Failed {
+            op: Op::Install,
+            error: Error::Conflict("c".into()),
+        });
+        m.inspect_without_command();
+        m.on_event(&Event::Failed {
+            op: Op::Install,
+            error: Error::Conflict("c".into()),
+        });
+        let Some(Cmd::Inspect { opts, .. }) = m.inspect_again() else {
+            panic!("expected an inspect command");
+        };
+        assert!(opts.no_bin);
     }
 }

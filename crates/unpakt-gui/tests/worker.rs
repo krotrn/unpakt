@@ -68,6 +68,7 @@ fn inspect(eng: &mut Engine, input: &Path) -> Box<unpakt_core::engine::InstallPl
         eng,
         Cmd::Inspect {
             input: input.to_str().unwrap().into(),
+            opts: AddOpts::default(),
             cancel: Cancel::new(),
         },
     );
@@ -88,6 +89,7 @@ fn inspect_then_install_emits_progress_plan_and_list() {
 
     let events = run_with_progress(tmp.path(), |_| Cmd::Inspect {
         input,
+        opts: AddOpts::default(),
         cancel: Cancel::new(),
     });
     assert!(

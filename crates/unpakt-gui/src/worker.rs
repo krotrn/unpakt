@@ -23,6 +23,7 @@ pub enum Op {
 pub enum Cmd {
     Inspect {
         input: String,
+        opts: AddOpts,
         cancel: Cancel,
     },
     Install {
@@ -90,10 +91,14 @@ impl Cmd {
 pub fn handle(engine: &mut Engine, cmd: Cmd, emit: &dyn Fn(Event)) {
     let op = cmd.op();
     let result: Result<(), Error> = match cmd {
-        Cmd::Inspect { input, cancel } => {
+        Cmd::Inspect {
+            input,
+            opts,
+            cancel,
+        } => {
             engine.set_cancel(cancel);
             engine
-                .inspect(&input, AddOpts::default())
+                .inspect(&input, opts)
                 .map(|plan| emit(Event::Inspected(Box::new(plan))))
         }
         Cmd::Install { plan, cancel } => {

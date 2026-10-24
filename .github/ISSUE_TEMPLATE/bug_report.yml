@@ -1,0 +1,29 @@
+name: Bug report
+description: unpakt itself doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: The command you ran (or what you did in the app), what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: unpakt version, how you installed it, and your distribution
+      placeholder: "unpakt 0.1.0, AppImage from get.sh, Fedora 43"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `unpakt doctor`
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Debug output
+      description: Run the failing command again with `-vv`, e.g. `unpakt -vv update`. For the desktop app, start it from a terminal with `RUST_LOG=debug unpakt-gui`.
+      render: text

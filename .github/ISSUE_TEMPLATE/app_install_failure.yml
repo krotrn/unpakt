@@ -1,0 +1,41 @@
+name: An app doesn't install or run
+description: unpakt can't install, update or launch a particular AppImage or tarball
+labels: [app-compat]
+body:
+  - type: input
+    id: source
+    attributes:
+      label: The app
+      description: What you passed to `unpakt add`, a download URL or `owner/repo`.
+      placeholder: "https://github.com/owner/repo, or owner/repo"
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: What goes wrong?
+      options:
+        - unpakt refuses or fails to install it
+        - It installs, but doesn't start
+        - It starts, but has no launcher entry or icon
+        - Updating or rolling it back fails
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: unpakt version and your distribution
+      placeholder: "unpakt 0.1.0, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: textarea
+    id: inspect
+    attributes:
+      label: Output of `unpakt inspect <the app>`
+      render: text
+  - type: textarea
+    id: error
+    attributes:
+      label: The error
+      description: The failing command run with `-vv` (e.g. `unpakt -vv add owner/repo`), or the app's own output when started from a terminal.
+      render: text

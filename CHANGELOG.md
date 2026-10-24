@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-24
+
 ### Fixed
 
 - `unpakt self uninstall` and `self update` on Arch no longer stop at

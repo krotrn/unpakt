@@ -1,6 +1,6 @@
 # Maintainer: krotrn <krotrn.ks@gmail.com>
 pkgname=unpakt
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Install, update and roll back AppImages and tarballs per user"
 arch=('x86_64')

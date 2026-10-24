@@ -93,7 +93,6 @@ fn line<T: Serialize>(value: &T) -> Result<String> {
 
 /// Reads a journal. A torn or unparsable last line is ignored: its step was
 /// recorded before it ran, so it never ran. Anything else unparsable is an error.
-#[allow(dead_code)] // consumed by recovery
 pub(crate) fn read(path: &Path) -> Result<(Intent, Vec<Undo>)> {
     let bytes = fs::read(path).at(path)?;
     let text = String::from_utf8_lossy(&bytes);

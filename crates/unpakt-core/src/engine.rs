@@ -20,6 +20,7 @@ use crate::format::detect;
 use crate::host::Host;
 use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
+use crate::journal::{Expect, Intent};
 use crate::lock::{self, WriteLock};
 use crate::manifest::{AppRecord, FileKind, FileRecord, Manifest, VersionRecord};
 use crate::model::{
@@ -27,6 +28,7 @@ use crate::model::{
 };
 use crate::naming::{slug, validate_command, version_label};
 use crate::progress::{Progress, ProgressFn};
+use crate::recover::{Recovered, journals, recover};
 use crate::select::choose;
 use crate::source::{for_kind, resolve};
 use crate::version::is_newer;
@@ -278,10 +280,37 @@ impl Engine {
     }
 
     /// Takes the write lock, reporting `WaitingForLock` if it has to wait.
-    fn begin(&mut self) -> Result<WriteLock> {
+    fn take_lock(&self) -> Result<WriteLock> {
         lock::acquire(&self.layout.data.join("lock"), || {
             self.emit(Progress::WaitingForLock)
         })
+    }
+
+    /// Takes the write lock, then recovers any operation a crashed process
+    /// left unfinished. Fails if a journal cannot be recovered safely.
+    fn begin(&mut self) -> Result<WriteLock> {
+        let lock = self.take_lock()?;
+        recover(&lock, &self.layout, &self.manifest)?;
+        Ok(lock)
+    }
+
+    /// Undoes or finishes the operations that crashed processes left behind.
+    pub fn recover(&mut self) -> Result<Recovered> {
+        let lock = self.take_lock()?;
+        recover(&lock, &self.layout, &self.manifest)
+    }
+
+    /// A transaction whose steps are journaled for `app`, which must show
+    /// `expect` in the manifest once the operation has committed.
+    fn journaled(&self, app: &str, expect: Expect) -> Result<Txn> {
+        Txn::journaled(
+            self.cancel.clone(),
+            &self.layout.data.join("journal"),
+            Intent {
+                app: app.to_string(),
+                expect,
+            },
+        )
     }
 
     /// Takes the write lock and fails if `app` is no longer what the caller
@@ -565,7 +594,7 @@ impl Engine {
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
         self.emit(Progress::Installing);
-        let mut txn = Txn::with_cancel(self.cancel.clone());
+        let mut txn = self.journaled(&id, Expect::Current(p.plan.label.clone()))?;
         self.clear_stale(&id, &[], &mut txn)?;
         let installed = backend.install(&p.plan, &self.layout, &mut txn)?;
         let current = self.layout.apps.join(&id).join("current");
@@ -768,7 +797,7 @@ impl Engine {
             files,
         } = self.lock_unchanged(&app)?;
         self.emit(Progress::Installing);
-        let mut txn = Txn::with_cancel(self.cancel.clone());
+        let mut txn = self.journaled(id, Expect::Current(label.clone()))?;
         let known: Vec<&str> = versions.iter().map(|v| v.label.as_str()).collect();
         self.clear_stale(id, &known, &mut txn)?;
         let installed = backend.install(&p.plan, &self.layout, &mut txn)?;
@@ -890,7 +919,7 @@ impl Engine {
                 })
             });
 
-        let mut txn = Txn::with_cancel(self.cancel.clone());
+        let mut txn = self.journaled(id, Expect::Current(target.label.clone()))?;
         let link = self.layout.apps.join(id).join("current");
         txn.symlink_swap(Path::new(&target.label), &link)?;
         let exec = link.join(&target.entry);
@@ -938,7 +967,7 @@ impl Engine {
         let _lock = self.begin()?;
         let (_, _, files) = self.get(id)?;
         self.emit(Progress::Installing);
-        let mut txn = Txn::with_cancel(self.cancel.clone());
+        let mut txn = self.journaled(id, Expect::Absent)?;
         disintegrate(&files, &mut txn)?;
         let dir = self.layout.apps.join(id);
         if std::fs::symlink_metadata(&dir).is_ok() {
@@ -986,6 +1015,8 @@ impl Engine {
             },
         });
 
+        checks.push(self.check_journal());
+
         match self.manifest.list() {
             Ok(apps) => {
                 for app in apps {
@@ -999,6 +1030,33 @@ impl Engine {
             }),
         }
         checks
+    }
+
+    fn check_journal(&self) -> Check {
+        let name = "journal".to_string();
+        match journals(&self.layout.data.join("journal")) {
+            Ok(files) if files.is_empty() => Check {
+                name,
+                ok: true,
+                detail: "no unfinished operations".into(),
+            },
+            Ok(files) => {
+                let list: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                Check {
+                    name,
+                    ok: false,
+                    detail: format!(
+                        "unfinished operations are recorded in {}; the next change recovers them",
+                        list.join(", ")
+                    ),
+                }
+            }
+            Err(e) => Check {
+                name,
+                ok: false,
+                detail: format!("cannot read the journal directory: {e}"),
+            },
+        }
     }
 
     fn check_app(&self, app: &AppRecord) -> Check {

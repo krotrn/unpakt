@@ -14,6 +14,7 @@ pub mod model;
 pub mod naming;
 pub mod paths;
 pub mod progress;
+pub mod recover;
 pub mod select;
 pub mod source;
 pub mod txn;

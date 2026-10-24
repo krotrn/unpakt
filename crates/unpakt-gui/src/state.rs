@@ -290,6 +290,10 @@ impl Model {
         }
 
         let was_working = matches!(self.busy, Busy::Working { .. });
+        // A background reload that fails while nothing runs is not worth a dialog.
+        if !was_working && matches!(e, Event::Failed { op: Op::List, .. }) {
+            return Effect::Toast("Could not refresh the app list".into());
+        }
         self.busy = Busy::Idle;
         self.cancel = None;
         self.list_pending = false;
@@ -511,9 +515,9 @@ mod tests {
         let rows = review_rows(&plan);
         assert_eq!(rows[1].1, format!("{} (1.0.3-rc)", plan.plan.label));
         assert_eq!(rows[6].1, "unpakt-fixture-tool --run");
+        assert_eq!(rows[7], ("Launcher entry", "yes".to_string()));
         plan.command = None;
         assert_eq!(review_rows(&plan)[6].1, "none");
-        assert_eq!(rows[7], ("Launcher entry", "yes".to_string()));
     }
 
     #[test]
@@ -880,5 +884,31 @@ mod tests {
         assert_eq!(m.busy, Busy::Idle);
         m.start(Op::Update);
         assert!(m.refresh_list().is_none());
+    }
+
+    #[test]
+    fn background_list_failure_while_idle_is_a_toast() {
+        let mut m = Model::default();
+        let effect = m.on_event(&Event::Failed {
+            op: Op::List,
+            error: Error::Refused("db".into()),
+        });
+        assert_eq!(
+            effect,
+            Effect::Toast("Could not refresh the app list".into())
+        );
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn trailing_list_failure_still_shows_a_dialog() {
+        let mut m = Model::default();
+        m.start(Op::Remove);
+        m.on_event(&Event::Removed { id: "a".into() });
+        let effect = m.on_event(&Event::Failed {
+            op: Op::List,
+            error: Error::Refused("db".into()),
+        });
+        assert!(matches!(effect, Effect::ShowError { .. }), "{effect:?}");
     }
 }

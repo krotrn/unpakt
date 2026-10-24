@@ -101,7 +101,8 @@ pub fn version_label(raw: &str) -> String {
             }
         })
         .collect();
-    if clean.is_empty() || clean.starts_with('.') {
+    // `current` is the active-version symlink and dot names are working dirs.
+    if clean.is_empty() || clean.starts_with('.') || clean == "current" {
         format!("_{clean}")
     } else {
         clean
@@ -148,10 +149,12 @@ mod tests {
         assert_eq!(version_label("v1.6.7"), "1.6.7");
         assert_eq!(version_label("../etc"), "_.._etc");
         assert_eq!(version_label(""), "_");
-        for raw in [".x", "..", "/a", "v", "a/b"] {
+        // Names the install dir already uses for something else.
+        assert_ne!(version_label("current"), "current");
+        for raw in [".x", "..", "/a", "v", "a/b", "current", ".staging-1"] {
             let l = version_label(raw);
             assert!(
-                !l.starts_with('.') && !l.contains('/') && !l.is_empty(),
+                !l.starts_with('.') && !l.contains('/') && !l.is_empty() && l != "current",
                 "{raw} -> {l}"
             );
         }

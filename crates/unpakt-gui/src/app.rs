@@ -25,6 +25,7 @@ pub enum Msg {
     CancelReview,
     CancelOp,
     InspectAgain,
+    InspectWithoutCommand,
     Worker(Event),
     CloseRequested,
     OpenApp(String),
@@ -40,8 +41,6 @@ pub struct App {
     worker: WorkerController<EngineWorker>,
     /// The inspected plan waiting on the review page.
     plan: Option<Box<InstallPlan>>,
-    /// The last input sent to inspect, for "Inspect again".
-    last_input: Option<String>,
     /// Set once the window may close without asking the model again.
     may_close: Rc<Cell<bool>>,
     /// The installed apps and known updates behind the list.
@@ -192,7 +191,6 @@ impl SimpleComponent for App {
             model: Model::default(),
             worker,
             plan: None,
-            last_input: None,
             may_close,
             apps: Vec::new(),
             updates: Vec::new(),
@@ -236,8 +234,13 @@ impl SimpleComponent for App {
                 );
             }
             Msg::InspectAgain => {
-                if let Some(input) = self.last_input.clone() {
-                    self.inspect(&input);
+                if let Some(cmd) = self.model.inspect_again() {
+                    self.worker.emit(cmd);
+                }
+            }
+            Msg::InspectWithoutCommand => {
+                if let Some(cmd) = self.model.inspect_without_command() {
+                    self.worker.emit(cmd);
                 }
             }
             Msg::Confirm => {
@@ -305,9 +308,8 @@ impl App {
         let Some(input) = normalize_input(raw) else {
             return;
         };
-        self.last_input = Some(input.clone());
-        let cancel = self.model.start(Op::Inspect);
-        self.worker.emit(Cmd::Inspect { input, cancel });
+        let cmd = self.model.inspect(input);
+        self.worker.emit(cmd);
     }
 
     fn discard_plan(&mut self) {
@@ -410,6 +412,9 @@ impl App {
                 body,
                 inspect_again,
             } => self.show_error(&title, &body, inspect_again, sender),
+            Effect::OfferWithoutCommand { title, body } => {
+                self.show_shadowed(&title, &body, sender);
+            }
             Effect::Toast(text) => self.toast(&text),
             Effect::Close => {
                 self.discard_plan();
@@ -435,6 +440,20 @@ impl App {
             let sender = sender.clone();
             dialog.connect_response(Some("again"), move |_, _| sender.input(Msg::InspectAgain));
         }
+        dialog.present(Some(&self.ui.window));
+    }
+
+    fn show_shadowed(&self, title: &str, body: &str, sender: &ComponentSender<Self>) {
+        let dialog = adw::AlertDialog::new(Some(title), Some(body));
+        dialog.add_response("close", "Close");
+        dialog.add_response("without", "Install without command");
+        dialog.set_response_appearance("without", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("without"));
+        dialog.set_close_response("close");
+        let sender = sender.clone();
+        dialog.connect_response(Some("without"), move |_, _| {
+            sender.input(Msg::InspectWithoutCommand);
+        });
         dialog.present(Some(&self.ui.window));
     }
 

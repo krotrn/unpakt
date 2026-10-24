@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use percent_encoding::percent_decode_str;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{AUTHORIZATION, ETAG, LAST_MODIFIED};
+use reqwest::header::{AUTHORIZATION, ETAG, HeaderValue, LAST_MODIFIED};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -60,6 +60,14 @@ fn file_name_of(url: &Url) -> Result<String> {
     Ok(name.into_owned())
 }
 
+/// The `Authorization` value for `token`.
+fn bearer(token: &str) -> Result<HeaderValue> {
+    let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| Error::Http("the token is not a valid header value".into()))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 fn same_origin(a: &Url, b: &Url) -> bool {
     a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
@@ -105,7 +113,7 @@ impl Http {
         if let (Some(token), Ok(api)) = (&self.token, Url::parse(&self.github_api))
             && same_origin(&parsed, &api)
         {
-            req = req.header(AUTHORIZATION, format!("Bearer {token}"));
+            req = req.header(AUTHORIZATION, bearer(token)?);
         }
         let resp = req.send().map_err(|e| http_err(url, e))?;
         let status = resp.status();
@@ -200,6 +208,14 @@ impl Http {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_header_is_sensitive() {
+        let value = bearer("tok").unwrap();
+        assert!(value.is_sensitive());
+        assert_eq!(value.as_bytes(), b"Bearer tok");
+        assert!(bearer("bad\nvalue").is_err());
+    }
 
     #[test]
     fn same_origin_compares_host_and_port() {

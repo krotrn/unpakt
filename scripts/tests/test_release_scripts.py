@@ -1,7 +1,6 @@
 import contextlib
 import io
 import re
-import shutil
 import sys
 import tempfile
 import unittest
@@ -15,14 +14,27 @@ import bump_version as bump  # noqa: E402
 import release_check as check  # noqa: E402
 import release_notes as notes  # noqa: E402
 
-COPIED = [
-    "Cargo.toml",
-    "Cargo.lock",
-    "CHANGELOG.md",
-    "crates/unpakt-cli/Cargo.toml",
-    "crates/unpakt-gui/Cargo.toml",
-    "data/io.github.krotrn.Unpakt.metainfo.xml",
-]
+FIXTURES = {
+    "Cargo.toml": '[workspace.package]\nversion = "0.1.0"\nedition = "2021"\n',
+    "crates/unpakt-cli/Cargo.toml": (
+        '[dependencies]\nunpakt-core = { version = "0.1.0", path = "../unpakt-core" }\n'
+    ),
+    "crates/unpakt-gui/Cargo.toml": (
+        '[dependencies]\nunpakt-core = { version = "0.1.0", path = "../unpakt-core" }\n'
+        'serde = "1"\n'
+    ),
+    "Cargo.lock": "".join(
+        f'[[package]]\nname = "{name}"\nversion = "0.1.0"\n\n'
+        for name in ("unpakt-cli", "unpakt-core", "unpakt-gui")
+    ),
+    "CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- x\n",
+    "data/io.github.krotrn.Unpakt.metainfo.xml": (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<component type="desktop-application">\n'
+        '  <id>io.github.krotrn.Unpakt</id>\n  <releases>\n'
+        '    <release version="0.1.0" date="2026-10-24"/>\n  </releases>\n</component>\n'
+    ),
+    "packaging/arch/PKGBUILD": "pkgver=0.1.0\npkgrel=3\n",
+}
 METAINFO = "data/io.github.krotrn.Unpakt.metainfo.xml"
 
 
@@ -31,13 +43,10 @@ class ReleaseScripts(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        for rel in COPIED:
+        for rel, content in FIXTURES.items():
             dest = self.root / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(REPO / rel, dest)
-        pkg = self.root / "packaging/arch/PKGBUILD"
-        pkg.parent.mkdir(parents=True)
-        pkg.write_text("pkgver=0.1.0\npkgrel=3\n", encoding="utf-8")
+            dest.write_text(content, encoding="utf-8")
 
     def bump(self, version, root):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -103,7 +112,8 @@ class ReleaseScripts(unittest.TestCase):
 
     def test_bump_rejects_bad_version(self):
         before = self.snapshot()
-        self.assertEqual(self.bump("v0.2", self.root), 2)
+        for bad in ("v0.2", "0.2.0\n", "0.2.0..", "0.2.0-", "0.2"):
+            self.assertEqual(self.bump(bad, self.root), 2, bad)
         self.assertEqual(self.snapshot(), before)
 
     def test_bump_is_all_or_nothing(self):

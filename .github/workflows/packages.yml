@@ -47,11 +47,15 @@ jobs:
       - name: Install and smoke test
         run: |
           pacman -U --noconfirm packaging/arch/out/*.pkg.tar.zst
+          pacman -S --noconfirm --needed desktop-file-utils appstream
           unpakt --version
+          unpakt --help >/dev/null
           test -x /usr/bin/unpakt-gui
           test -f /usr/share/applications/io.github.krotrn.Unpakt.desktop
           test -f /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
           test -f /usr/share/icons/hicolor/scalable/apps/io.github.krotrn.Unpakt.svg
+          desktop-file-validate /usr/share/applications/io.github.krotrn.Unpakt.desktop
+          appstreamcli validate --no-net /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -128,9 +132,13 @@ jobs:
       - name: Install and smoke test
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y ./deb/*.deb
+          DEBIAN_FRONTEND=noninteractive apt-get install -y ./deb/*.deb desktop-file-utils appstream
           unpakt --version
+          unpakt --help >/dev/null
           test -x /usr/bin/unpakt-gui
+          test -f /usr/share/icons/hicolor/scalable/apps/io.github.krotrn.Unpakt.svg
+          desktop-file-validate /usr/share/applications/io.github.krotrn.Unpakt.desktop
+          appstreamcli validate --no-net /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
           if ldd /usr/bin/unpakt-gui | grep 'not found'; then
             echo "::error::unpakt-gui has unresolved libraries on ${{ matrix.image }}"
             exit 1
@@ -173,6 +181,7 @@ jobs:
           image=$(echo packaging/appimage/out/*.AppImage)
           chmod +x "$image"
           "$image" --appimage-extract-and-run cli --version
+          "$image" --appimage-extract-and-run cli --help >/dev/null
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

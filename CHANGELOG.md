@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `unpakt completion bash|zsh|fish|elvish|powershell` prints a completion
+  script generated from the command definitions. The Arch and Debian/Ubuntu
+  packages install the bash, zsh and fish ones; `get.sh` installs bash and fish
+  completions for your user.
+- `get.sh`, a one-command installer that picks the pacman repository, the
+  release `.deb`, the AppImage or the command-line binary for your system.
+
 ## [0.1.0] - 2026-10-24
 
 ### Added

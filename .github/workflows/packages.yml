@@ -54,6 +54,9 @@ jobs:
           test -f /usr/share/applications/io.github.krotrn.Unpakt.desktop
           test -f /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
           test -f /usr/share/icons/hicolor/scalable/apps/io.github.krotrn.Unpakt.svg
+          test -s /usr/share/bash-completion/completions/unpakt
+          test -s /usr/share/zsh/site-functions/_unpakt
+          test -s /usr/share/fish/vendor_completions.d/unpakt.fish
           desktop-file-validate /usr/share/applications/io.github.krotrn.Unpakt.desktop
           appstreamcli validate --no-net /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
 
@@ -137,6 +140,9 @@ jobs:
           unpakt --help >/dev/null
           test -x /usr/bin/unpakt-gui
           test -f /usr/share/icons/hicolor/scalable/apps/io.github.krotrn.Unpakt.svg
+          test -s /usr/share/bash-completion/completions/unpakt
+          test -s /usr/share/zsh/vendor-completions/_unpakt
+          test -s /usr/share/fish/vendor_completions.d/unpakt.fish
           desktop-file-validate /usr/share/applications/io.github.krotrn.Unpakt.desktop
           appstreamcli validate --no-net /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
           if ldd /usr/bin/unpakt-gui | grep 'not found'; then

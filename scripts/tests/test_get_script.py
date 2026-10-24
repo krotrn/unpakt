@@ -49,8 +49,16 @@ class GetScriptTests(unittest.TestCase):
     def test_without_a_session_only_the_command_line(self):
         commands = self.dry_run("ID=arch\n")
         self.assertIn("download and verify unpakt-VERSION-x86_64-linux-musl", commands)
-        self.assertEqual(commands[-1], "install -m 755 /unpakt-VERSION-x86_64-linux-musl /home/u/.local/bin/unpakt")
+        self.assertIn("install -m 755 /unpakt-VERSION-x86_64-linux-musl /home/u/.local/bin/unpakt", commands)
         self.assertFalse(any(c.startswith("sudo") for c in commands))
+
+    def test_appimage_and_cli_routes_write_completions_for_the_user(self):
+        for args, display in (((), False), (("--gui",), True)):
+            commands = self.dry_run("ID=fedora\n", *args, display=display)
+            self.assertIn("write /home/u/.local/share/bash-completion/completions/unpakt", commands)
+            self.assertIn("write /home/u/.config/fish/completions/unpakt.fish", commands)
+        # The packages ship their own.
+        self.assertNotIn("completions", " ".join(self.dry_run("ID=arch\n", display=True)))
 
     def test_gui_flags_override_the_session(self):
         self.assertIn("sudo pacman -Sy --needed --noconfirm unpakt", self.dry_run("ID=arch\n", "--gui"))

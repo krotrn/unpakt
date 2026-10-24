@@ -38,6 +38,12 @@ install -Dm644 data/icons/hicolor/scalable/apps/io.github.krotrn.Unpakt.svg \
     -t "$stage/usr/share/icons/hicolor/scalable/apps/"
 doc="$stage/usr/share/doc/unpakt"
 install -Dm644 "$here/copyright" "$doc/copyright"
+target/release/unpakt completion bash |
+    install -Dm644 /dev/stdin "$stage/usr/share/bash-completion/completions/unpakt"
+target/release/unpakt completion zsh |
+    install -Dm644 /dev/stdin "$stage/usr/share/zsh/vendor-completions/_unpakt"
+target/release/unpakt completion fish |
+    install -Dm644 /dev/stdin "$stage/usr/share/fish/vendor_completions.d/unpakt.fish"
 gzip -9n -c CHANGELOG.md > "$doc/changelog.gz"
 chmod 644 "$doc/changelog.gz"
 # Debian-format changelog (policy requires one); the upstream history is changelog.gz.

@@ -229,6 +229,32 @@ install_cli() {  # the latest release's static command-line binary
     run install -m 755 "$TMP/$bin" "$BIN/unpakt"
 }
 
+install_completions() {  # the packages ship completions; the AppImage and CLI routes write them here
+    if [ "$(id -u)" -eq 0 ] && [ "$DRY_RUN" = 0 ]; then
+        set -- bash /usr/local/share/bash-completion/completions/unpakt \
+            zsh /usr/local/share/zsh/site-functions/_unpakt \
+            fish /usr/local/share/fish/vendor_completions.d/unpakt.fish
+    else
+        # zsh has no per-user completion directory; see the README.
+        set -- bash "$SHARE/bash-completion/completions/unpakt" \
+            fish "${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/unpakt.fish"
+    fi
+    while [ $# -gt 0 ]; do
+        shell=$1 file=$2
+        shift 2
+        if [ "$DRY_RUN" = 1 ]; then
+            echo "+ write $file"
+            continue
+        fi
+        mkdir -p "$(dirname "$file")"
+        if APPIMAGE_EXTRACT_AND_RUN=1 "$BIN/unpakt" completion "$shell" >"$file.tmp" 2>/dev/null; then
+            mv "$file.tmp" "$file"
+        else
+            rm -f "$file.tmp"  # releases before `unpakt completion` existed
+        fi
+    done
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -263,13 +289,15 @@ main() {
         case $distro in
             arch) install_arch ;;
             debian) install_deb ;;
-            *) install_appimage ;;
+            *) install_appimage && install_completions ;;
         esac || {
             say "→" "Could not install the desktop app; installing the command line instead"
             install_cli
+            install_completions
         }
     else
         install_cli
+        install_completions
     fi
 
     [ "$DRY_RUN" = 1 ] && return
@@ -279,7 +307,12 @@ main() {
         return
     fi
     echo
-    say "✔" "$(unpakt --version 2>/dev/null) installed."
+    # Without FUSE the AppImage would print its FUSE help instead of a version.
+    if version=$(APPIMAGE_EXTRACT_AND_RUN=1 unpakt --version 2>/dev/null); then
+        say "✔" "$version installed."
+    else
+        say "✔" "unpakt installed."
+    fi
     say "→" "Install an app with: unpakt add <file, URL or owner/repo>"
 }
 

@@ -115,6 +115,23 @@ is optional and lets unpakt run AppImages without extracting them.
 Upgrade the same way you installed: `sudo pacman -Syu`, the newer `.deb`, the
 newer AppImage or binary. Installed apps and their records are kept.
 
+## Shell completion
+
+The Arch and Debian/Ubuntu packages install completions for bash, zsh and
+fish, and `get.sh` installs the bash and fish ones for your user. To install
+them yourself, pick your shell (`install -D` creates the folder when it doesn't
+exist yet):
+
+```sh
+unpakt completion bash | install -Dm644 /dev/stdin ~/.local/share/bash-completion/completions/unpakt
+unpakt completion fish | install -Dm644 /dev/stdin ~/.config/fish/completions/unpakt.fish
+unpakt completion zsh  | sudo install -Dm644 /dev/stdin /usr/local/share/zsh/site-functions/_unpakt
+```
+
+Then open a new terminal. zsh caches completions; if `unpakt <Tab>` still does
+nothing, run `rm -f ~/.zcompdump*` and open another one. `unpakt completion`
+also knows `elvish` and `powershell`.
+
 ## Verify a download
 
 ```sh

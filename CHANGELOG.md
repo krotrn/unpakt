@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-24
+
 ### Added
 
 - File managers now offer unpakt for AppImages and tarballs (`.tar.gz`,

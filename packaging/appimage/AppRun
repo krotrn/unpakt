@@ -1,0 +1,21 @@
+#!/bin/sh
+# AppImage entry point: the GUI by default, the CLI when invoked through an
+# `unpakt` symlink or with `cli` as the first argument.
+HERE=$(dirname "$(readlink -f "$0")")
+export APPDIR="${APPDIR:-$HERE}"
+
+# Environment hooks installed by linuxdeploy plugins (GTK paths, schemas, ...).
+for hook in "$HERE"/apprun-hooks/*.sh; do
+    # shellcheck source=/dev/null
+    [ -f "$hook" ] && . "$hook"
+done
+
+name=$(basename "${ARGV0:-$0}")
+if [ "$name" = unpakt ]; then
+    exec "$HERE/usr/bin/unpakt" "$@"
+fi
+if [ "${1:-}" = cli ]; then
+    shift
+    exec "$HERE/usr/bin/unpakt" "$@"
+fi
+exec "$HERE/usr/bin/unpakt-gui" "$@"

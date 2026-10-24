@@ -113,6 +113,14 @@ pub enum Busy {
     },
 }
 
+impl Busy {
+    /// Whether Cancel can stop what is running. Rolling back and removing run
+    /// with a token nothing can cancel.
+    pub fn cancellable(&self) -> bool {
+        matches!(self, Busy::Working { op, .. } if !matches!(op, Op::Rollback | Op::Remove))
+    }
+}
+
 /// The window's state. The view sends the command returned by `start` and
 /// applies the `Effect` returned by `on_event`.
 #[derive(Debug, Default)]
@@ -216,11 +224,13 @@ impl Model {
                 Event::Updates { .. } => return Effect::None,
                 Event::Apps(_) if !self.list_pending => return Effect::None,
                 Event::Failed { op, error }
-                    if matches!(op, Op::List | Op::Check) && op != running =>
+                    if matches!(op, Op::List | Op::Check)
+                        && op != running
+                        && !(self.list_pending && *op == Op::List) =>
                 {
                     return Effect::ShowError {
                         title: failure_title(*op).into(),
-                        body: error.to_string(),
+                        body: failure_body(error),
                         inspect_again: false,
                     };
                 }
@@ -240,7 +250,7 @@ impl Model {
             } => Effect::Toast("Cancelled".into()),
             Event::Failed { op, error } => Effect::ShowError {
                 title: failure_title(*op).into(),
-                body: error.to_string(),
+                body: failure_body(error),
                 inspect_again: *op == Op::Install && matches!(error, Error::Conflict(_)),
             },
             Event::Inspected(_) => Effect::ShowReview,
@@ -284,6 +294,20 @@ fn starting_label(op: Op) -> &'static str {
         Op::Rollback => "Rolling back…",
         Op::Remove => "Removing…",
         Op::List => "Loading…",
+    }
+}
+
+/// The message for the dialog. The engine's wording for an app that is
+/// already installed names the CLI; the window points at its own list.
+fn failure_body(error: &Error) -> String {
+    match error {
+        Error::Conflict(msg) => match msg.split_once("; use `unpakt update") {
+            Some((head, _)) => {
+                format!("{head}. To get a newer version, use Update in the installed list.")
+            }
+            None => error.to_string(),
+        },
+        _ => error.to_string(),
     }
 }
 
@@ -623,5 +647,55 @@ mod tests {
     #[test]
     fn close_when_idle_is_immediate() {
         assert!(Model::default().request_close());
+    }
+
+    #[test]
+    fn conflict_wording_points_at_the_installed_list() {
+        let mut m = Model::default();
+        m.start(Op::Install);
+        let effect = m.on_event(&Event::Failed {
+            op: Op::Install,
+            error: Error::Conflict("tool is already installed; use `unpakt update tool`".into()),
+        });
+        let Effect::ShowError { body, .. } = effect else {
+            panic!("expected an error dialog");
+        };
+        assert!(!body.contains("unpakt update"), "{body}");
+        assert!(body.contains("tool is already installed"), "{body}");
+        assert!(body.contains("Update"), "{body}");
+    }
+
+    #[test]
+    fn failed_trailing_list_ends_the_change_as_a_list_failure() {
+        let mut m = Model::default();
+        m.start(Op::Install);
+        assert!(matches!(
+            m.on_event(&Event::Installed(app("a", "A", "1.0"))),
+            Effect::Toast(_)
+        ));
+        let effect = m.on_event(&Event::Failed {
+            op: Op::List,
+            error: Error::Refused("db".into()),
+        });
+        assert!(
+            matches!(&effect, Effect::ShowError { title, inspect_again: false, .. } if title == "Could not load apps"),
+            "{effect:?}"
+        );
+        assert_eq!(m.busy, Busy::Idle);
+        assert!(m.cancel.is_none());
+    }
+
+    #[test]
+    fn rollback_and_remove_cannot_be_cancelled() {
+        let mut m = Model::default();
+        assert!(!m.busy.cancellable());
+        for op in [Op::Rollback, Op::Remove] {
+            m.start(op);
+            assert!(!m.busy.cancellable(), "{op:?}");
+        }
+        for op in [Op::Inspect, Op::Install, Op::Update] {
+            m.start(op);
+            assert!(m.busy.cancellable(), "{op:?}");
+        }
     }
 }

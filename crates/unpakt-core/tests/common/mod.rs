@@ -257,6 +257,17 @@ impl MockForge {
         etag_of(bytes)
     }
 
+    /// How many requests for exactly `path` have been received.
+    pub fn request_count(&self, path: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .seen
+            .iter()
+            .filter(|(p, _)| p == path)
+            .count()
+    }
+
     /// The `Authorization` headers received for requests to `path`.
     pub fn auth_for(&self, path: &str) -> Vec<Option<String>> {
         let state = self.state.lock().unwrap();

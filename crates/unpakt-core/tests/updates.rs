@@ -158,8 +158,49 @@ fn update_check_update_rollback() {
     assert_eq!(recorded, on_disk);
 
     assert!(matches!(engine.rollback(&id), Err(Error::NotFound(_))));
-    // 2.0.0 is still on disk, so nothing new is installed.
+}
+
+#[test]
+fn update_after_rollback_switches_back_without_downloading() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine(root.path(), &forge);
+    let layout = engine.layout().clone();
+
+    publish(&forge, src.path(), "1.0.0");
+    let id = install_latest(&mut engine);
+    publish(&forge, src.path(), "2.0.0");
+    assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+    assert_eq!(engine.rollback(&id).unwrap(), "1.0.0");
+
+    let asset = "/dl/Unpakt-Fixture-Upd-2.0.0.AppImage";
+    let downloads = forge.request_count(asset);
+    let found = engine.check_updates(None).unwrap().updates;
+    assert_eq!(
+        found,
+        vec![UpdateInfo {
+            id: id.clone(),
+            current: "1.0.0".into(),
+            latest: "2.0.0".into(),
+        }]
+    );
+    assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+    assert_eq!(
+        forge.request_count(asset),
+        downloads,
+        "nothing is fetched again"
+    );
+    let (app, versions, _) = engine.get(&id).unwrap();
+    assert_eq!(app.current, "2.0.0");
+    assert_eq!(versions.len(), 2);
+    assert_eq!(
+        std::fs::read_link(layout.apps.join(&id).join("current")).unwrap(),
+        Path::new("2.0.0")
+    );
+    assert!(engine.check_updates(None).unwrap().updates.is_empty());
     assert_eq!(engine.update(&id).unwrap(), None);
+    assert_eq!(download_dirs(&layout), 0);
 }
 
 #[test]

@@ -8,7 +8,7 @@ use crate::desktop::{DesktopEntry, exec_line, field_codes, replace_argv0};
 use crate::error::{Error, Result};
 use crate::manifest::{FileKind, FileRecord};
 use crate::model::{ExecKind, Icon};
-use crate::naming::validate_command;
+use crate::naming::{slug, validate_command};
 use crate::paths::Layout;
 use crate::txn::Txn;
 
@@ -103,6 +103,9 @@ fn build_desktop(req: &IntegrateReq, has_icon: bool, warnings: &mut Vec<String>)
         {
             entry.set(key, v);
         }
+    }
+    if slug(req.name) != req.id {
+        entry.tag_names(req.id);
     }
     let codes = entry.get("Exec").map(field_codes).unwrap_or_default();
     let mut exec = exec_line(req.exec, &codes);

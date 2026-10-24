@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.krotrn.Unpakt</id>
+  <name>unpakt</name>
+  <summary>Install and manage AppImages and tarballs per user</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <developer id="io.github.krotrn">
+    <name>Karan Kumar Sah</name>
+  </developer>
+  <description>
+    <p>
+      unpakt installs portable Linux apps (AppImages and tarballs) for your
+      user account from a file, a download URL or a GitHub repository, and adds
+      them to your application menu and command path.
+    </p>
+    <p>
+      Installed apps can be updated, rolled back to their previous version or
+      removed again, from the app list or the command line.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.krotrn.Unpakt.desktop</launchable>
+  <url type="homepage">https://github.com/krotrn/unpakt</url>
+  <url type="bugtracker">https://github.com/krotrn/unpakt/issues</url>
+  <provides>
+    <binary>unpakt</binary>
+    <binary>unpakt-gui</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-24"/>
+  </releases>
+</component>

@@ -11,6 +11,7 @@ for hook in "$HERE"/apprun-hooks/*.sh; do
 done
 
 name=$(basename "${ARGV0:-$0}")
+unset ARGV0
 if [ "$name" = unpakt ]; then
     exec "$HERE/usr/bin/unpakt" "$@"
 fi

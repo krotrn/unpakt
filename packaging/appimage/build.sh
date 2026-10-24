@@ -17,6 +17,9 @@ linuxdeploy_url=https://github.com/linuxdeploy/linuxdeploy/releases/download/1-a
 linuxdeploy_sha256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
 gtk_plugin_url=https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/3b67a1d1c1b0c8268f57f2bce40fe2d33d409cea/linuxdeploy-plugin-gtk.sh
 gtk_plugin_sha256=b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171
+# Pinned type2 runtime (release 20251108), embedded into the AppImage.
+runtime_url=https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+runtime_sha256=2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -37,11 +40,12 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 fetch() { # url sha256 destination
-    curl -fsSL --retry 3 -o "$3" "$1"
+    curl -fsSL --proto '=https' --retry 3 -o "$3" "$1"
     echo "$2  $3" | sha256sum -c --quiet -
 }
 fetch "$linuxdeploy_url" "$linuxdeploy_sha256" "$work/linuxdeploy-x86_64.AppImage"
 fetch "$gtk_plugin_url" "$gtk_plugin_sha256" "$work/linuxdeploy-plugin-gtk.sh"
+fetch "$runtime_url" "$runtime_sha256" "$work/runtime-x86_64"
 chmod +x "$work/linuxdeploy-x86_64.AppImage" "$work/linuxdeploy-plugin-gtk.sh"
 
 appdir="$work/AppDir"
@@ -54,7 +58,7 @@ install -Dm644 "data/icons/hicolor/scalable/apps/$id.svg" \
 
 (
     cd "$work"
-    PATH="$work:$PATH" DEPLOY_GTK_VERSION=4 LINUXDEPLOY_OUTPUT_VERSION="$version" \
+    PATH="$work:$PATH" LDAI_RUNTIME_FILE="$work/runtime-x86_64" DEPLOY_GTK_VERSION=4 LINUXDEPLOY_OUTPUT_VERSION="$version" \
         ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
         --appdir AppDir --plugin gtk \
         --executable "$appdir/usr/bin/unpakt" --executable "$appdir/usr/bin/unpakt-gui" \

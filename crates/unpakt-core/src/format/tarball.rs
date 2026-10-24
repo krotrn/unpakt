@@ -24,6 +24,7 @@ const SOURCE_MARKERS: [&str; 9] = [
 ];
 const PENALISED_DIRS: [&str; 5] = ["lib", "libexec", "share", "test", "tests"];
 const MAX_DESKTOP_BYTES: u64 = 256 * 1024;
+const MAX_ICON_BYTES: u64 = 8 * 1024 * 1024;
 const ICON_EXTS: [&str; 3] = ["png", "svg", "xpm"];
 
 pub struct Tarball;
@@ -136,7 +137,7 @@ impl FormatPlugin for Tarball {
                     Some(prefix) => prefix.join(rel_path),
                     None => rel_path,
                 };
-                read_icon(&a.path, &full)?
+                read_icon(&a.path, &full, &mut warnings)?
             }
             None => None,
         };
@@ -466,7 +467,7 @@ fn find_icon(
 }
 
 /// Second pass: reads the contents of the chosen icon file.
-fn read_icon(archive_path: &Path, full: &Path) -> Result<Option<Icon>> {
+fn read_icon(archive_path: &Path, full: &Path, warnings: &mut Vec<String>) -> Result<Option<Icon>> {
     let ext = icon_ext(full).map(str::to_string);
     let Some(ext) = ext else {
         return Ok(None);
@@ -483,6 +484,14 @@ fn read_icon(archive_path: &Path, full: &Path) -> Result<Option<Icon>> {
         }
         let path = entry.path().map_err(bad_tar)?.into_owned();
         if clean(&path)? == full {
+            if entry.size() > MAX_ICON_BYTES {
+                warnings.push(format!(
+                    "ignoring icon {}: too large ({} bytes)",
+                    full.display(),
+                    entry.size()
+                ));
+                return Ok(None);
+            }
             let mut data = Vec::new();
             entry.read_to_end(&mut data).map_err(bad_tar)?;
             return Ok(Some(Icon { ext, data }));

@@ -480,3 +480,50 @@ fn force_never_replaces_a_directory_at_the_bin_target() {
         "precious"
     );
 }
+
+#[test]
+fn no_fuse_command_is_a_wrapper_that_sets_extract_and_run() {
+    let (_dir, layout, exec) = setup();
+    fs::create_dir_all(exec.parent().unwrap()).unwrap();
+    fs::write(
+        &exec,
+        "#!/bin/sh\necho \"extract=$APPIMAGE_EXTRACT_AND_RUN args=$*\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&exec, fs::Permissions::from_mode(0o755)).unwrap();
+    let pv = OsString::from(&layout.bin);
+    let bin = layout.bin.join("unpakt-fixture-foo");
+
+    let run = || {
+        let out = std::process::Command::new("sh")
+            .arg(&bin)
+            .args(["one", "two words"])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let mut r = req(&exec, &pv);
+    r.no_fuse_appimage = true;
+    let mut txn = Txn::new();
+    let first = integrate(&layout, &r, &mut txn).unwrap();
+    txn.commit();
+    assert!(!fs::symlink_metadata(&bin).unwrap().is_symlink());
+    assert_eq!(run(), "extract=1 args=one two words\n");
+
+    // Re-integrating over the owned wrapper, and switching back to a plain link.
+    r.owned = &first.files;
+    let mut txn = Txn::new();
+    let second = integrate(&layout, &r, &mut txn).unwrap();
+    txn.commit();
+    assert_eq!(run(), "extract=1 args=one two words\n");
+
+    let mut plain = req(&exec, &pv);
+    plain.owned = &second.files;
+    let mut txn = Txn::new();
+    integrate(&layout, &plain, &mut txn).unwrap();
+    txn.commit();
+    assert!(fs::symlink_metadata(&bin).unwrap().is_symlink());
+}

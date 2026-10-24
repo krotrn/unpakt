@@ -172,10 +172,12 @@ impl SimpleComponent for App {
             }
         });
 
+        // The first activation is the window appearing; startup loads the list itself.
+        let first_activation = Cell::new(true);
         window.connect_is_active_notify({
             let sender = sender.clone();
             move |window| {
-                if window.is_active() {
+                if window.is_active() && !first_activation.replace(false) {
                     sender.input(Msg::WindowActivated);
                 }
             }
@@ -326,6 +328,10 @@ impl App {
         if let Some(app) = self.apps.iter().find(|a| a.id == id) {
             let detail = Detail::new(app, self.has_update(id), sender);
             self.ui.nav.push(&detail.page);
+            detail.set_idle(self.model.busy == Busy::Idle);
+            detail
+                .busy
+                .show(&self.model.busy, self.model.close_requested);
             self.detail = Some(detail);
         }
     }

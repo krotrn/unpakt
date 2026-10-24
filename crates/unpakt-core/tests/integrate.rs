@@ -236,7 +236,18 @@ fn shadowed_command_refused() {
     let pv = std::env::join_paths([&other, &layout.bin]).unwrap();
     let mut txn = Txn::new();
     let err = integrate(&layout, &req(&exec, &pv), &mut txn).unwrap_err();
-    assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+    assert!(
+        matches!(&err, Error::Shadowed { command, by }
+            if command == "unpakt-fixture-foo" && *by == other.join("unpakt-fixture-foo")),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "conflict: `unpakt-fixture-foo` would be shadowed by {}; use --force or choose another command",
+            other.join("unpakt-fixture-foo").display()
+        )
+    );
     drop(txn);
     assert!(!layout.bin.join("unpakt-fixture-foo").exists());
 

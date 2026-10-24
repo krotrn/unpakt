@@ -203,10 +203,10 @@ pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<I
     if let (Some(command), false) = (req.command, req.force || owns_bin)
         && let Some(dir) = find_shadow(command, req.path_var, &layout.bin)
     {
-        return Err(Error::Conflict(format!(
-            "`{command}` would be shadowed by {}; use --force or choose another command",
-            dir.join(command).display()
-        )));
+        return Err(Error::Shadowed {
+            command: command.to_string(),
+            by: dir.join(command),
+        });
     }
     let mut targets = vec![bin_path.as_deref(), icon_path.as_deref()];
     if req.want_desktop {

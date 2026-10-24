@@ -121,6 +121,8 @@ pub struct Model {
     pub close_requested: bool,
     /// Cancels the running operation.
     cancel: Option<Cancel>,
+    /// A change succeeded and its fresh list has not arrived yet.
+    list_pending: bool,
 }
 
 /// What the view must do after an event.
@@ -148,6 +150,7 @@ impl Model {
             waiting: false,
         };
         self.cancel = Some(cancel.clone());
+        self.list_pending = false;
         cancel
     }
 
@@ -196,6 +199,7 @@ impl Model {
                 self.cancel = None;
                 return Effect::Close;
             }
+            self.list_pending = true;
             return match e {
                 Event::Installed(app) => {
                     Effect::Toast(format!("Installed {} {}", app.name, app.current))
@@ -204,9 +208,30 @@ impl Model {
             };
         }
 
+        // Startup and background reads never go through `start`, so their
+        // results must not end an operation the user is running. Only the list
+        // that follows a successful change does.
+        if let Busy::Working { op: running, .. } = &self.busy {
+            match e {
+                Event::Updates { .. } => return Effect::None,
+                Event::Apps(_) if !self.list_pending => return Effect::None,
+                Event::Failed { op, error }
+                    if matches!(op, Op::List | Op::Check) && op != running =>
+                {
+                    return Effect::ShowError {
+                        title: failure_title(*op).into(),
+                        body: error.to_string(),
+                        inspect_again: false,
+                    };
+                }
+                _ => {}
+            }
+        }
+
         let was_working = matches!(self.busy, Busy::Working { .. });
         self.busy = Busy::Idle;
         self.cancel = None;
+        self.list_pending = false;
 
         let effect = match e {
             Event::Failed {
@@ -516,6 +541,74 @@ mod tests {
         assert!(matches!(m.busy, Busy::Working { .. }));
         assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
         assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn background_list_keeps_a_running_op_busy() {
+        let mut m = Model::default();
+        let c = m.start(Op::Update);
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert!(matches!(m.busy, Busy::Working { op: Op::Update, .. }));
+        m.cancel_op();
+        assert!(c.is_cancelled());
+        assert_eq!(
+            m.on_event(&Event::Updates {
+                available: vec![],
+                failed: 0,
+            }),
+            Effect::None
+        );
+        assert!(matches!(m.busy, Busy::Working { .. }));
+        // The mutation's own trailing list still ends it.
+        m.on_event(&Event::Updated {
+            id: "a".into(),
+            label: None,
+        });
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn list_from_before_the_change_does_not_end_it() {
+        let mut m = Model::default();
+        m.start(Op::Remove);
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert!(matches!(m.busy, Busy::Working { .. }));
+        m.on_event(&Event::Removed { id: "a".into() });
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn background_list_does_not_end_an_inspect() {
+        let mut m = Model::default();
+        m.start(Op::Inspect);
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert!(matches!(m.busy, Busy::Working { .. }));
+    }
+
+    #[test]
+    fn updates_while_idle_change_nothing() {
+        let mut m = Model::default();
+        let event = Event::Updates {
+            available: vec![],
+            failed: 1,
+        };
+        assert_eq!(m.on_event(&event), Effect::None);
+        assert_eq!(m.on_event(&Event::Apps(vec![])), Effect::None);
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn background_failure_keeps_a_running_op_busy() {
+        let mut m = Model::default();
+        m.start(Op::Remove);
+        let effect = m.on_event(&Event::Failed {
+            op: Op::Check,
+            error: Error::Unsupported("x".into()),
+        });
+        assert!(matches!(effect, Effect::ShowError { .. }));
+        assert!(matches!(m.busy, Busy::Working { .. }));
     }
 
     #[test]

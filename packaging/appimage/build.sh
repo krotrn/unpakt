@@ -55,6 +55,7 @@ install -Dm644 "data/$id.desktop" -t "$appdir/usr/share/applications/"
 install -Dm644 "data/$id.metainfo.xml" -t "$appdir/usr/share/metainfo/"
 install -Dm644 "data/icons/hicolor/scalable/apps/$id.svg" \
     -t "$appdir/usr/share/icons/hicolor/scalable/apps/"
+install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$appdir/usr/share/licenses/unpakt/"
 
 (
     cd "$work"

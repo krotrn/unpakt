@@ -63,9 +63,19 @@ jobs:
       attestations: write
     env:
       VERSION: ${{ needs.verify.outputs.version }}
-      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-      MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
     steps:
+      - name: Check for a signing key
+        id: signing
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [[ -n $MINISIGN_SECRET_KEY ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::MINISIGN_SECRET_KEY not set; SHA256SUMS is not signed"
+          fi
+
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
@@ -82,11 +92,15 @@ jobs:
           ls -l release
 
       - name: Sign checksums
-        if: env.MINISIGN_SECRET_KEY != ''
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends minisign
           key="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$key"' EXIT
           (umask 077; printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
           cd release
           if [[ -n $MINISIGN_PASSWORD ]]; then
@@ -94,12 +108,7 @@ jobs:
           else
             minisign -W -S -s "$key" -m SHA256SUMS -t "unpakt $VERSION"
           fi
-          rm -f "$key"
           ls -l SHA256SUMS.minisig
-
-      - name: Note unsigned checksums
-        if: env.MINISIGN_SECRET_KEY == ''
-        run: echo "::notice::MINISIGN_SECRET_KEY not set; SHA256SUMS is not signed"
 
       - name: Build provenance
         uses: actions/attest-build-provenance@v4
@@ -167,16 +176,31 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Only the newest release updates this
+        id: latest
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          newest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [[ $newest == "$GITHUB_REF_NAME" ]]; then
+            echo "newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "newest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$GITHUB_REF_NAME is not the newest release ($newest); skipping the pacman repository"
+          fi
 
       - name: Download package
+        if: steps.latest.outputs.newest == 'true'
         uses: actions/download-artifact@v8
         with:
           name: arch-package
           path: repo
 
       - name: Build repository database
+        if: steps.latest.outputs.newest == 'true'
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           rm -f repo/PKGBUILD repo/.SRCINFO
           if [[ -n $GPG_PRIVATE_KEY ]]; then
             printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --import
@@ -188,6 +212,7 @@ jobs:
           packaging/arch/ci-repo.sh repo
 
       - name: Upload to the arch-repo release
+        if: steps.latest.outputs.newest == 'true'
         run: |
           gh_repo=(--repo "$GITHUB_REPOSITORY")
           if ! gh release view "$REPO_RELEASE" "${gh_repo[@]}" >/dev/null 2>&1; then
@@ -213,23 +238,39 @@ jobs:
     env:
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Only the newest release updates this
+        id: latest
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          newest=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [[ $newest == "$GITHUB_REF_NAME" ]]; then
+            echo "newest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "newest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$GITHUB_REF_NAME is not the newest release ($newest); skipping the AUR"
+          fi
+
       - name: Skip without AUR key
-        if: env.AUR_SSH_PRIVATE_KEY == ''
+        if: steps.latest.outputs.newest == 'true' && env.AUR_SSH_PRIVATE_KEY == ''
         run: echo "::notice::AUR_SSH_PRIVATE_KEY not set; skipping AUR publish"
 
       - name: Download PKGBUILD
-        if: env.AUR_SSH_PRIVATE_KEY != ''
+        if: steps.latest.outputs.newest == 'true' && env.AUR_SSH_PRIVATE_KEY != ''
         uses: actions/download-artifact@v8
         with:
           name: arch-package
           path: arch
 
       - name: Push to aur.archlinux.org
-        if: env.AUR_SSH_PRIVATE_KEY != ''
+        if: steps.latest.outputs.newest == 'true' && env.AUR_SSH_PRIVATE_KEY != ''
         run: |
           install -dm700 ~/.ssh
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
+          (umask 077; printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur)
           ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
           export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes"
 
@@ -259,34 +300,42 @@ jobs:
       contents: read
       id-token: write  # trusted publishing; no API token stored in the repo
     env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       TRUSTED: ${{ vars.CRATES_IO_TRUSTED_PUBLISHING }}
       VERSION: ${{ needs.verify.outputs.version }}
     steps:
-      - name: Skip without crates.io credentials
-        if: env.CARGO_REGISTRY_TOKEN == '' && env.TRUSTED != 'true'
-        run: echo "::notice::CARGO_REGISTRY_TOKEN not set and CRATES_IO_TRUSTED_PUBLISHING is not 'true'; skipping crates.io publish"
+      - name: Check for crates.io credentials
+        id: creds
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ -n $CARGO_REGISTRY_TOKEN || $TRUSTED == true ]]; then
+            echo "has=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CARGO_REGISTRY_TOKEN not set and CRATES_IO_TRUSTED_PUBLISHING is not 'true'; skipping crates.io publish"
+          fi
 
       - name: Checkout
-        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        if: steps.creds.outputs.has == 'true'
         uses: actions/checkout@v7
 
       - name: Authenticate with crates.io
         id: auth
-        if: env.TRUSTED == 'true'
+        if: steps.creds.outputs.has == 'true' && env.TRUSTED == 'true'
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Install GTK and libadwaita
-        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        if: steps.creds.outputs.has == 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev
 
       - name: Set up Rust
-        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        if: steps.creds.outputs.has == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Publish
-        if: env.CARGO_REGISTRY_TOKEN != '' || env.TRUSTED == 'true'
+        if: steps.creds.outputs.has == 'true'
         env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           TRUSTED_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           if [[ $TRUSTED == true && -n $TRUSTED_TOKEN ]]; then

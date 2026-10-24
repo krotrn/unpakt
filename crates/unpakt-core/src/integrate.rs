@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::desktop::{DesktopEntry, exec_line, field_codes};
+use crate::desktop::{DesktopEntry, exec_line, field_codes, replace_argv0};
 use crate::error::{Error, Result};
 use crate::manifest::{FileKind, FileRecord};
 use crate::model::{ExecKind, Icon};
@@ -110,6 +110,14 @@ fn build_desktop(req: &IntegrateReq, has_icon: bool, warnings: &mut Vec<String>)
         exec.insert_str(0, NO_FUSE_PREFIX);
     }
     entry.set("Exec", &exec);
+    entry.rewrite_action_execs(|value| {
+        let line = replace_argv0(value, req.exec)?;
+        Some(if req.no_fuse_appimage {
+            format!("{NO_FUSE_PREFIX}{line}")
+        } else {
+            line
+        })
+    });
     if has_icon {
         entry.set("Icon", &format!("unpakt-{}", req.id));
     } else {

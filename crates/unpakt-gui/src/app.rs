@@ -458,7 +458,8 @@ impl App {
         if let Some(detail) = &self.detail {
             detail.set_idle(idle);
         }
+        ui.cancel.set_visible(self.model.busy.cancellable());
         ui.cancel
-            .set_sensitive(!idle && !self.model.close_requested);
+            .set_sensitive(self.model.busy.cancellable() && !self.model.close_requested);
     }
 }

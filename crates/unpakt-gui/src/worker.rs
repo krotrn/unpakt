@@ -98,10 +98,7 @@ pub fn handle(engine: &mut Engine, cmd: Cmd, emit: &dyn Fn(Event)) {
         }
         Cmd::Install { plan, cancel } => {
             engine.set_cancel(cancel);
-            engine.install(*plan).and_then(|app| {
-                emit(Event::Installed(app));
-                emit_apps(engine, emit)
-            })
+            engine.install(*plan).map(|app| emit(Event::Installed(app)))
         }
         Cmd::Discard(plan) => {
             engine.discard(*plan);
@@ -116,28 +113,34 @@ pub fn handle(engine: &mut Engine, cmd: Cmd, emit: &dyn Fn(Event)) {
         }),
         Cmd::Update { id, cancel } => {
             engine.set_cancel(cancel);
-            engine.update(&id).and_then(|label| {
-                emit(Event::Updated { id, label });
-                emit_apps(engine, emit)
-            })
+            engine
+                .update(&id)
+                .map(|label| emit(Event::Updated { id, label }))
         }
         Cmd::Rollback { id } => {
             engine.set_cancel(Cancel::new());
-            engine.rollback(&id).and_then(|label| {
-                emit(Event::RolledBack { id, label });
-                emit_apps(engine, emit)
-            })
+            engine
+                .rollback(&id)
+                .map(|label| emit(Event::RolledBack { id, label }))
         }
         Cmd::Remove { id } => {
             engine.set_cancel(Cancel::new());
-            engine.remove(&id).and_then(|()| {
-                emit(Event::Removed { id });
-                emit_apps(engine, emit)
-            })
+            engine.remove(&id).map(|()| emit(Event::Removed { id }))
         }
     };
-    if let Err(error) = result {
-        emit(Event::Failed { op, error });
+    match result {
+        Err(error) => emit(Event::Failed { op, error }),
+        // The change is committed by now; a failing list is its own failure,
+        // not a failure of the change.
+        Ok(()) if matches!(op, Op::Install | Op::Update | Op::Rollback | Op::Remove) => {
+            if let Err(error) = emit_apps(engine, emit) {
+                emit(Event::Failed {
+                    op: Op::List,
+                    error,
+                });
+            }
+        }
+        Ok(()) => {}
     }
 }
 

@@ -26,6 +26,7 @@ pub enum Msg {
     CancelOp,
     InspectAgain,
     InspectWithoutCommand,
+    WindowActivated,
     Worker(Event),
     CloseRequested,
     OpenApp(String),
@@ -187,6 +188,15 @@ impl SimpleComponent for App {
             }
         });
 
+        window.connect_is_active_notify({
+            let sender = sender.clone();
+            move |window| {
+                if window.is_active() {
+                    sender.input(Msg::WindowActivated);
+                }
+            }
+        });
+
         let app = App {
             model: Model::default(),
             worker,
@@ -240,6 +250,11 @@ impl SimpleComponent for App {
             }
             Msg::InspectWithoutCommand => {
                 if let Some(cmd) = self.model.inspect_without_command() {
+                    self.worker.emit(cmd);
+                }
+            }
+            Msg::WindowActivated => {
+                if let Some(cmd) = self.model.refresh_list() {
                     self.worker.emit(cmd);
                 }
             }

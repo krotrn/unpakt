@@ -21,11 +21,14 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = "4.6.11"
 ctrlc = { version = "3.5.2", features = ["termination"] }
+flate2 = "1.1.10"
+semver = "1.0.28"
+tar = "0.4.46"
+tempfile = "3.27.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unpakt-core = { version = "0.1.0", path = "../unpakt-core" }
 
 [dev-dependencies]
-flate2 = "1.1.10"
 libc = "0.2.191"
-tar = "0.4.46"
-tempfile = "3.27.0"
+hex = "0.4.3"
+sha2 = "0.11.1"

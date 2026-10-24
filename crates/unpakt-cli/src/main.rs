@@ -1,4 +1,5 @@
 mod output;
+mod selfmgmt;
 
 use std::io::{BufRead, IsTerminal};
 use std::process::ExitCode;
@@ -92,6 +93,12 @@ enum Command {
     Doctor,
     /// Print the shell completion script for SHELL
     Completion { shell: clap_complete::Shell },
+    /// Update or remove unpakt itself
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        action: selfmgmt::SelfAction,
+    },
 }
 
 /// A refusal to proceed, as opposed to a failure.
@@ -287,7 +294,9 @@ fn run(command: Command) -> Result<()> {
             println!("{label}");
         }
         Command::Doctor => output::print_checks(&engine.doctor()),
-        Command::Completion { .. } => unreachable!("handled before the engine opens"),
+        Command::Completion { .. } | Command::SelfCmd { .. } => {
+            unreachable!("handled before the engine opens")
+        }
     }
     Ok(())
 }
@@ -382,6 +391,7 @@ fn main() -> ExitCode {
             print_completion(shell);
             Ok(())
         }
+        Command::SelfCmd { action } => selfmgmt::run(action),
         command => run(command),
     };
     match result {

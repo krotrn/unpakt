@@ -406,11 +406,205 @@ fn completion_scripts_cover_every_command() {
         let script = stdout(&out);
         assert!(script.contains(marker), "{shell}: {script}");
         for command in [
-            "add", "inspect", "list", "info", "update", "rollback", "remove", "doctor",
+            "add", "inspect", "list", "info", "update", "rollback", "remove", "doctor", "self",
         ] {
             assert!(script.contains(command), "{shell} misses {command}");
         }
     }
     let data = tmp.path().join(".local/share/unpakt");
     assert!(!data.exists(), "completion must not create unpakt's data");
+}
+
+// ── unpakt self ──────────────────────────────────────────────────────────────
+
+const NEW_VERSION: &str = "99.0.0";
+
+/// Serves `files` (URL path -> body) on a local port until the test ends.
+fn serve(files: Vec<(String, Vec<u8>)>) -> String {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let path = request.split_whitespace().nth(1).unwrap_or("");
+            let reply = match files.iter().find(|(p, _)| p == path) {
+                Some((_, body)) => {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    [head.as_bytes(), body].concat()
+                }
+                None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec(),
+            };
+            let _ = stream.write_all(&reply);
+        }
+    });
+    base
+}
+
+/// A release server offering the static binary `body` as `NEW_VERSION`.
+fn release_server(body: &[u8], sum: Option<String>) -> String {
+    use sha2::{Digest, Sha256};
+
+    let name = format!("unpakt-{NEW_VERSION}-x86_64-linux-musl");
+    let sum = sum.unwrap_or_else(|| hex::encode(Sha256::digest(body)));
+    serve(vec![
+        (
+            "/releases/latest/download/SHA256SUMS".into(),
+            format!("{sum}  {name}\n").into_bytes(),
+        ),
+        (
+            format!("/releases/download/v{NEW_VERSION}/{name}"),
+            body.to_vec(),
+        ),
+    ])
+}
+
+/// Copies the built binary to where get.sh puts the command-line install.
+fn install_binary_copy(root: &Path) -> PathBuf {
+    let bin = root.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("unpakt");
+    std::fs::copy(env!("CARGO_BIN_EXE_unpakt"), &exe).unwrap();
+    exe
+}
+
+fn run_exe(exe: &Path, root: &Path, repo: Option<&str>, args: &[&str]) -> Output {
+    let mut cmd = Command::new(exe);
+    cmd.env_clear()
+        .env("UNPAKT_ROOT", root)
+        .env("HOME", root)
+        .env(
+            "PATH",
+            format!("{}/.local/bin:/usr/bin:/bin", root.display()),
+        )
+        .args(args)
+        .stdin(Stdio::null());
+    if let Some(repo) = repo {
+        cmd.env("UNPAKT_REPO_URL", repo);
+    }
+    cmd.output().unwrap()
+}
+
+#[test]
+fn self_update_check_prints_versions_and_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = release_server(b"new", None);
+    let out = run_exe(
+        Path::new(env!("CARGO_BIN_EXE_unpakt")),
+        tmp.path(),
+        Some(&repo),
+        &["self", "update", "--check"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!("current: {}", env!("CARGO_PKG_VERSION"))),
+        "{text}"
+    );
+    assert!(text.contains(&format!("latest:  {NEW_VERSION}")), "{text}");
+    assert!(!tmp.path().join(".local/share/unpakt").exists());
+}
+
+#[test]
+fn self_uninstall_without_yes_on_non_tty_refuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = install_binary_copy(tmp.path());
+    let out = run_exe(&exe, tmp.path(), None, &["self", "uninstall"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--yes"), "{}", stderr(&out));
+    assert!(exe.exists());
+}
+
+#[test]
+fn self_update_replaces_the_command_line_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = install_binary_copy(tmp.path());
+    let repo = release_server(b"#!/bin/sh\necho new unpakt\n", None);
+    let out = run_exe(&exe, tmp.path(), Some(&repo), &["self", "update"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&exe).unwrap(),
+        "#!/bin/sh\necho new unpakt\n"
+    );
+    assert_eq!(
+        std::fs::metadata(&exe).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(exe.parent().unwrap()).unwrap().collect();
+    assert_eq!(leftovers.len(), 1, "temp file left behind: {leftovers:?}");
+}
+
+#[test]
+fn self_update_with_a_bad_checksum_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = install_binary_copy(tmp.path());
+    let before = std::fs::read(&exe).unwrap();
+    let repo = release_server(b"tampered", Some("0".repeat(64)));
+    let out = run_exe(&exe, tmp.path(), Some(&repo), &["self", "update"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("checksum"), "{}", stderr(&out));
+    assert_eq!(std::fs::read(&exe).unwrap(), before);
+}
+
+#[test]
+fn self_uninstall_removes_the_binary_and_keeps_the_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = install_binary_copy(tmp.path());
+    let bash = tmp
+        .path()
+        .join(".local/share/bash-completion/completions/unpakt");
+    let fish = tmp.path().join(".config/fish/completions/unpakt.fish");
+    for f in [&bash, &fish] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, "# completion\n").unwrap();
+    }
+    let tarball = fixture_tarball(tmp.path());
+    let added = run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
+
+    let out = run_exe(&exe, tmp.path(), None, &["self", "uninstall", "--yes"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!exe.exists() && !bash.exists() && !fish.exists());
+    assert!(tmp.path().join(".local/share/unpakt/db.sqlite").exists());
+    assert!(stdout(&out).contains("--purge"), "{}", stdout(&out));
+}
+
+#[test]
+fn self_uninstall_purge_removes_apps_and_data() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = install_binary_copy(tmp.path());
+    let tarball = fixture_tarball(tmp.path());
+    let added = run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    assert_eq!(added.status.code(), Some(0), "{}", stderr(&added));
+    let command = tmp.path().join(".local/bin/unpakt-fixture-tool");
+    assert!(command.exists(), "the app's command was placed");
+
+    let out = run_exe(
+        &exe,
+        tmp.path(),
+        None,
+        &["self", "uninstall", "--purge", "--yes"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!exe.exists());
+    assert!(!command.exists(), "the app's command is gone");
+    assert!(!tmp.path().join(".local/share/unpakt").exists());
+}
+
+#[test]
+fn self_uninstall_fails_when_the_install_is_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The built binary sits in target/, which is no install location.
+    let out = run(tmp.path(), &["self", "uninstall", "--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("#install"), "{}", stderr(&out));
 }

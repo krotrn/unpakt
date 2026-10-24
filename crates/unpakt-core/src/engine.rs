@@ -55,6 +55,13 @@ pub struct UpdateCheck {
     pub failed: Vec<(String, Error)>,
 }
 
+/// The write lock plus the state of one app read while holding it.
+struct Locked {
+    lock: WriteLock,
+    versions: Vec<VersionRecord>,
+    files: Vec<FileRecord>,
+}
+
 /// Removes a per-operation download directory when dropped.
 struct DownloadGuard(Option<PathBuf>);
 
@@ -278,16 +285,25 @@ impl Engine {
     }
 
     /// Takes the write lock and fails if `app` is no longer what the caller
-    /// read before it started working.
-    fn lock_unchanged(&mut self, app: &AppRecord) -> Result<WriteLock> {
+    /// read before it started working. Returns the versions and files as
+    /// they are under the lock; those read earlier may be stale.
+    fn lock_unchanged(&mut self, app: &AppRecord) -> Result<Locked> {
         let lock = self.begin()?;
-        match self.manifest.get(&app.id)? {
-            Some(now) if now.current == app.current => Ok(lock),
-            _ => Err(Error::Conflict(format!(
+        let changed = || {
+            Error::Conflict(format!(
                 "{} was changed by another unpakt process; try again",
                 app.id
-            ))),
+            ))
+        };
+        match self.manifest.get(&app.id)? {
+            Some(now) if now.current == app.current => {}
+            _ => return Err(changed()),
         }
+        Ok(Locked {
+            lock,
+            versions: self.manifest.versions(&app.id)?,
+            files: self.manifest.files(&app.id)?,
+        })
     }
 
     pub fn with_http(mut self, http: Http) -> Engine {
@@ -677,8 +693,17 @@ impl Engine {
             if let Some(target) = versions.iter().find(|v| v.label == label)
                 && label != current.label
             {
-                let _lock = self.lock_unchanged(&app)?;
-                self.activate(&app, target, &files)?;
+                let locked = self.lock_unchanged(&app)?;
+                let target = locked
+                    .versions
+                    .iter()
+                    .find(|v| v.label == target.label)
+                    .ok_or_else(|| {
+                        Error::Conflict(format!(
+                            "{id} was changed by another unpakt process; try again"
+                        ))
+                    })?;
+                self.activate(&app, target, &locked.files)?;
                 return Ok(Some(label));
             }
         }
@@ -707,8 +732,17 @@ impl Engine {
                 assets: Vec::new(),
             };
             if label != current.label && newer_release(&app, &current, &fetched).is_some() {
-                let _lock = self.lock_unchanged(&app)?;
-                self.activate(&app, target, &files)?;
+                let locked = self.lock_unchanged(&app)?;
+                let target = locked
+                    .versions
+                    .iter()
+                    .find(|v| v.label == target.label)
+                    .ok_or_else(|| {
+                        Error::Conflict(format!(
+                            "{id} was changed by another unpakt process; try again"
+                        ))
+                    })?;
+                self.activate(&app, target, &locked.files)?;
                 return Ok(Some(label));
             }
             return Ok(None);
@@ -728,7 +762,11 @@ impl Engine {
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
-        let _lock = self.lock_unchanged(&app)?;
+        let Locked {
+            lock: _lock,
+            versions,
+            files,
+        } = self.lock_unchanged(&app)?;
         self.emit(Progress::Installing);
         let mut txn = Txn::with_cancel(self.cancel.clone());
         let known: Vec<&str> = versions.iter().map(|v| v.label.as_str()).collect();

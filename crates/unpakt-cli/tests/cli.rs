@@ -158,7 +158,7 @@ fn update_of_local_file_app_is_reported_not_attempted() {
 
     let all = run(tmp.path(), &["update", "--check"]);
     assert_eq!(all.status.code(), Some(0), "{}", stderr(&all));
-    assert_eq!(stdout(&all), "all apps are up to date\n");
+    assert_eq!(stdout(&all), "no apps with an update source\n");
     let all = run(tmp.path(), &["update"]);
     assert_eq!(all.status.code(), Some(0), "{}", stderr(&all));
 
@@ -296,11 +296,11 @@ fn update_check_says_so_when_nothing_is_installed() {
     let tmp = tempfile::tempdir().unwrap();
     let out = run(tmp.path(), &["update", "--check"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert_eq!(stdout(&out), "all apps are up to date\n");
+    assert_eq!(stdout(&out), "no apps installed\n");
 }
 
 #[test]
-fn update_check_with_an_id_names_the_app() {
+fn update_check_of_a_local_file_app_says_it_has_no_source() {
     let tmp = tempfile::tempdir().unwrap();
     let tarball = fixture_tarball(tmp.path());
     run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
@@ -310,8 +310,15 @@ fn update_check_with_an_id_names_the_app() {
         .unwrap()
         .to_string();
     let out = run(tmp.path(), &["update", "--check", &id]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert_eq!(stdout(&out), format!("{id} is up to date\n"));
+    assert_eq!(stdout(&out), "");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains(&format!(
+            "{id} was installed from a local file and has no update source"
+        )),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -346,4 +353,13 @@ fn summary_version_has_no_parentheses_when_label_is_the_raw_version() {
         "{}",
         stdout(&out)
     );
+}
+
+#[test]
+fn update_check_of_an_unknown_id_fails_naming_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run(tmp.path(), &["update", "--check", "no-such-app"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("no-such-app"), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
 }

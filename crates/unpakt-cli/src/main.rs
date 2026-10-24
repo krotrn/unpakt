@@ -240,12 +240,31 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Update { id, check } => {
             if check {
+                let checkable = match id.as_deref() {
+                    Some(id) => {
+                        let app = engine.get(id)?.0;
+                        if app.source.kind == SourceKind::LocalFile {
+                            return Err(Error::Unsupported(format!(
+                                "{id} was installed from a local file and has no update source"
+                            ))
+                            .into());
+                        }
+                        1
+                    }
+                    None => engine
+                        .list()?
+                        .iter()
+                        .filter(|a| a.source.kind != SourceKind::LocalFile)
+                        .count(),
+                };
                 let found = engine.check_updates(id.as_deref())?;
                 output::print_updates(&found.updates);
                 if found.updates.is_empty() && found.failed.is_empty() {
                     match id.as_deref() {
                         Some(id) => println!("{id} is up to date"),
-                        None => println!("all apps are up to date"),
+                        None if checkable > 0 => println!("all apps are up to date"),
+                        None if engine.list()?.is_empty() => println!("no apps installed"),
+                        None => println!("no apps with an update source"),
                     }
                 }
                 report_failed_checks(&found.failed)?;

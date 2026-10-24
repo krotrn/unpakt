@@ -244,8 +244,7 @@ fn run(command: Command) -> Result<()> {
                 output::print_updates(&found.updates);
                 report_failed_checks(&found.failed)?;
             } else {
-                let _armed = interrupt.arm();
-                update_apps(&mut engine, id.as_deref())?;
+                update_apps(&mut engine, &interrupt, id.as_deref())?;
             }
         }
         Command::Rollback { id } => {
@@ -260,9 +259,10 @@ fn run(command: Command) -> Result<()> {
 
 /// Updates one app, or every app that has an update. One app failing does not
 /// stop the others; the run still fails.
-fn update_apps(engine: &mut Engine, id: Option<&str>) -> Result<()> {
+fn update_apps(engine: &mut Engine, interrupt: &Interrupt, id: Option<&str>) -> Result<()> {
     if let Some(id) = id {
         let old = engine.get(id)?.0.current;
+        let _armed = interrupt.arm();
         report_update(id, &old, engine.update(id)?);
         return Ok(());
     }
@@ -280,17 +280,29 @@ fn update_apps(engine: &mut Engine, id: Option<&str>) -> Result<()> {
             }
             continue;
         };
-        match engine.update(&app.id) {
+        let outcome = {
+            let _armed = interrupt.arm();
+            engine.update(&app.id)
+        };
+        match outcome {
             Ok(new) => report_update(&app.id, &info.current, new),
-            Err(e) => {
-                eprintln!("error: {}: {e:#}", app.id);
-                failed += 1;
-            }
+            Err(e) => note_update_failure(&app.id, e, &mut failed)?,
         }
     }
     if failed > 0 {
         anyhow::bail!("{failed} update(s) failed");
     }
+    Ok(())
+}
+
+/// Records one app's failed update. An interruption is not a failure to count:
+/// it ends the whole run.
+fn note_update_failure(id: &str, e: Error, failed: &mut usize) -> Result<()> {
+    if matches!(e, Error::Interrupted) {
+        return Err(e.into());
+    }
+    eprintln!("error: {id}: {e:#}");
+    *failed += 1;
     Ok(())
 }
 
@@ -334,5 +346,25 @@ fn main() -> ExitCode {
             }
             ExitCode::from(exit_code(&err))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_update_stops_the_run() {
+        let mut failed = 0;
+        let err = note_update_failure("a", Error::Interrupted, &mut failed).unwrap_err();
+        assert_eq!(exit_code(&err), EXIT_INTERRUPTED);
+        assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn other_update_failures_are_counted_and_the_run_continues() {
+        let mut failed = 0;
+        note_update_failure("a", Error::NotFound("x".into()), &mut failed).unwrap();
+        assert_eq!(failed, 1);
     }
 }

@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use common::{Comp, E, MockForge, build_appimage, build_tarball, tree_snapshot};
+use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine, KEEP_VERSIONS, UpdateInfo};
 use unpakt_core::host::Host;
 use unpakt_core::http::Http;
@@ -597,4 +598,24 @@ fn update_drops_files_the_new_version_no_longer_ships() {
 
     engine.remove(&id).unwrap();
     assert_eq!(tree_snapshot(root.path()), baseline);
+}
+
+#[test]
+fn rollback_with_cancel_set_is_undone() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let cancel = Cancel::new();
+    let mut engine = engine(root.path(), &forge).with_cancel(cancel.clone());
+
+    publish(&forge, src.path(), "1.0.0");
+    let id = install_latest(&mut engine);
+    publish(&forge, src.path(), "2.0.0");
+    engine.update(&id).unwrap();
+    let before = tree_snapshot(root.path());
+
+    cancel.cancel();
+    assert!(matches!(engine.rollback(&id), Err(Error::Interrupted)));
+    assert_eq!(tree_snapshot(root.path()), before);
+    assert_eq!(engine.get(&id).unwrap().0.current, "2.0.0");
 }

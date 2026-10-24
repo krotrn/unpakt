@@ -58,6 +58,9 @@ fn add_without_yes_on_non_tty_refuses() {
     let list = run(tmp.path(), &["list"]);
     assert_eq!(list.status.code(), Some(0));
     assert_eq!(stdout(&list), "");
+    let apps = tmp.path().join(".local/share/unpakt/apps");
+    let entries: Vec<_> = std::fs::read_dir(&apps).unwrap().collect();
+    assert!(entries.is_empty(), "no app dir was created: {entries:?}");
 }
 
 #[test]
@@ -225,6 +228,16 @@ fn spawn_at_prompt(root: &Path, input: &Path) -> (std::process::Child, std::fs::
     (child, std::fs::File::from(master))
 }
 
+/// Kills and reaps the child on every path, including a panicking test.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn single_interrupt_at_the_prompt_exits_130_and_installs_nothing() {
     use std::io::Read;
@@ -233,9 +246,10 @@ fn single_interrupt_at_the_prompt_exits_130_and_installs_nothing() {
 
     let tmp = tempfile::tempdir().unwrap();
     let tarball = fixture_tarball(tmp.path());
-    let (mut child, _master) = spawn_at_prompt(tmp.path(), &tarball);
+    let (child, _master) = spawn_at_prompt(tmp.path(), &tarball);
+    let mut child = KillOnDrop(child);
 
-    let mut err = child.stderr.take().unwrap();
+    let mut err = child.0.stderr.take().unwrap();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = [0u8; 512];
@@ -254,14 +268,13 @@ fn single_interrupt_at_the_prompt_exits_130_and_installs_nothing() {
     }
 
     // SAFETY: plain signal delivery to our own child.
-    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    unsafe { libc::kill(child.0.id() as i32, libc::SIGINT) };
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
-        if let Some(s) = child.try_wait().unwrap() {
+        if let Some(s) = child.0.try_wait().unwrap() {
             break s;
         }
         if Instant::now() > deadline {
-            child.kill().unwrap();
             panic!("still running 5s after a single interrupt");
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -269,4 +282,7 @@ fn single_interrupt_at_the_prompt_exits_130_and_installs_nothing() {
     assert_eq!(status.code(), Some(130));
     let list = run(tmp.path(), &["list"]);
     assert_eq!(stdout(&list), "");
+    let apps = tmp.path().join(".local/share/unpakt/apps");
+    let entries: Vec<_> = std::fs::read_dir(&apps).unwrap().collect();
+    assert!(entries.is_empty(), "no app dir was created: {entries:?}");
 }

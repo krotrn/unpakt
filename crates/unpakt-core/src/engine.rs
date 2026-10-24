@@ -793,6 +793,7 @@ impl Engine {
             },
             &mut txn,
         )?;
+        self.cancel.check()?;
         self.manifest
             .set_current(id, &target.label, &integration.files)?;
         txn.commit();
@@ -816,12 +817,13 @@ impl Engine {
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
         let (_, _, files) = self.get(id)?;
-        let mut txn = Txn::new();
+        let mut txn = Txn::with_cancel(self.cancel.clone());
         disintegrate(&files, &mut txn)?;
         let dir = self.layout.apps.join(id);
         if std::fs::symlink_metadata(&dir).is_ok() {
             txn.remove_dir_all(&dir)?;
         }
+        self.cancel.check()?;
         self.manifest.remove(id)?;
         txn.commit();
         self.refresh_desktop_database();

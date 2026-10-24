@@ -21,6 +21,7 @@ class GetScriptTests(unittest.TestCase):
             env["UNPAKT_GLIBC"] = glibc
             env["HOME"] = "/home/u"
             env.pop("XDG_DATA_HOME", None)
+            env.pop("XDG_CONFIG_HOME", None)
             if display:
                 env["WAYLAND_DISPLAY"] = "wayland-0"
             result = subprocess.run(

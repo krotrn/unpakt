@@ -12,13 +12,16 @@ use sha2::{Digest, Sha256};
 
 use crate::backend::{Plan, for_payload};
 use crate::cancel::Cancel;
+use crate::desktop::{DesktopEntry, exec_argv0};
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::detect;
 use crate::host::Host;
 use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
 use crate::manifest::{AppRecord, FileKind, FileRecord, Manifest, VersionRecord};
-use crate::model::{Artifact, FormatKind, Icon, Release, SourceCfg, SourceKind};
+use crate::model::{
+    Artifact, EntryCandidate, FormatKind, Icon, Payload, Release, SourceCfg, SourceKind,
+};
 use crate::naming::{slug, validate_command, version_label};
 use crate::select::choose;
 use crate::source::{for_kind, resolve};
@@ -151,6 +154,29 @@ fn newer_release(
         current: shown_current,
         latest,
     })
+}
+
+/// The command name an app is known by: the binary the package itself runs,
+/// falling back to the app id when that is unknown or unusable.
+fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) -> String {
+    let named = match payload.format {
+        FormatKind::AppImage => payload
+            .desktop
+            .as_deref()
+            .and_then(|text| DesktopEntry::parse(text).ok())
+            .and_then(|d| d.get("Exec").and_then(exec_argv0)),
+        FormatKind::Tarball => entry
+            .and_then(|e| e.path.file_name())
+            .map(|n| n.to_string_lossy().into_owned()),
+    };
+    named
+        .and_then(|n| {
+            Path::new(&n)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+        })
+        .filter(|n| !["AppRun", "env"].contains(&n.as_str()) && validate_command(n).is_ok())
+        .unwrap_or_else(|| id.to_string())
 }
 
 fn sha256_prefix(path: &Path) -> Result<String> {
@@ -397,12 +423,7 @@ impl Engine {
         } else if let Some(c) = &opts.command {
             Some(c.clone())
         } else {
-            match (&entry, payload.format) {
-                (Some(e), FormatKind::Tarball) => {
-                    e.path.file_stem().map(|s| s.to_string_lossy().into_owned())
-                }
-                _ => Some(id.clone()),
-            }
+            Some(default_command(&id, entry.as_ref(), &payload))
         };
 
         let plan = Plan {

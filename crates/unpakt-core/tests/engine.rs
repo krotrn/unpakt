@@ -448,3 +448,81 @@ fn hostile_command_is_refused_at_inspect() {
     }
     assert_eq!(tree_snapshot(root.path()), before);
 }
+
+fn bundled_desktop(exec: &str) -> Vec<u8> {
+    format!("[Desktop Entry]\nType=Application\nName=Unpakt Fixture Real\nExec={exec}\n")
+        .into_bytes()
+}
+
+#[test]
+fn appimage_command_follows_the_bundled_desktop_exec() {
+    let src = tempfile::tempdir().unwrap();
+    let plan_for = |exec: &str, opts: AddOpts| {
+        let root = tempfile::tempdir().unwrap();
+        let image = build_appimage(
+            src.path(),
+            "Unpakt-Fixture-Real-1.0.AppImage",
+            &[
+                E::File("AppRun", ELF, 0o755),
+                E::File("real.desktop", &bundled_desktop(exec), 0o644),
+            ],
+        );
+        let plan = engine(root.path())
+            .inspect(image.to_str().unwrap(), opts)
+            .unwrap();
+        (plan.plan.id.clone(), plan.command.clone())
+    };
+    let (id, command) = plan_for("unpakt-fixture-nvim %F", AddOpts::default());
+    assert_eq!(id, "unpakt-fixture-real");
+    assert_eq!(command.as_deref(), Some("unpakt-fixture-nvim"));
+    assert_eq!(
+        plan_for("/usr/bin/unpakt-fixture-nvim --x", AddOpts::default())
+            .1
+            .as_deref(),
+        Some("unpakt-fixture-nvim")
+    );
+    assert_eq!(
+        plan_for("\"unpakt fixture nvim\" %U", AddOpts::default())
+            .1
+            .as_deref(),
+        Some("unpakt fixture nvim")
+    );
+    for useless in ["AppRun %U", "env FOO=1 tool", "..", "\"\""] {
+        assert_eq!(
+            plan_for(useless, AddOpts::default()).1.as_deref(),
+            Some("unpakt-fixture-real"),
+            "{useless}"
+        );
+    }
+    let explicit = AddOpts {
+        command: Some("chosen".into()),
+        ..AddOpts::default()
+    };
+    assert_eq!(
+        plan_for("unpakt-fixture-nvim", explicit).1.as_deref(),
+        Some("chosen")
+    );
+}
+
+#[test]
+fn tarball_command_is_the_entry_file_name() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = build_tarball(
+        src.path(),
+        "unpakt-fixture-pkg-1.0.tar.gz",
+        Comp::Gz,
+        &[E::File(
+            "unpakt-fixture-pkg/bin/unpakt-fixture-real.sh",
+            b"#!/bin/sh\n",
+            0o755,
+        )],
+    );
+    let engine = engine(root.path());
+    let plan = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    assert_eq!(plan.plan.id, "unpakt-fixture-pkg");
+    assert_eq!(plan.command.as_deref(), Some("unpakt-fixture-real.sh"));
+    engine.discard(plan);
+}

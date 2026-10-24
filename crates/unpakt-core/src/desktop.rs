@@ -304,14 +304,14 @@ pub fn exec_line(program: &Path, field_codes: &[String]) -> String {
     line
 }
 
-/// `exec` (as written in the file) with its program replaced by `program`.
-/// Arguments and field codes after it stay as they were. `None` when the
-/// value has no program or an unterminated quote.
-pub fn replace_argv0(exec: &str, program: &Path) -> Option<String> {
+/// The program of an `Exec` value (as written in the file), unquoted, and the
+/// byte offset in `exec` where its arguments start. `None` when the value has
+/// no program or an unterminated quote.
+fn split_argv0(exec: &str) -> Option<(String, usize)> {
     // Undo the file-level escapes, remembering where each char ended in the
     // raw text, so the untouched remainder can be copied verbatim.
     let mut chars: Vec<(char, usize)> = Vec::new();
-    let mut it = exec.char_indices().peekable();
+    let mut it = exec.char_indices();
     while let Some((i, c)) = it.next() {
         if c != '\\' {
             chars.push((c, i + c.len_utf8()));
@@ -319,7 +319,6 @@ pub fn replace_argv0(exec: &str, program: &Path) -> Option<String> {
         }
         match it.next() {
             Some((j, n)) => {
-                let end = j + n.len_utf8();
                 let real = match n {
                     's' => ' ',
                     'n' => '\n',
@@ -327,7 +326,7 @@ pub fn replace_argv0(exec: &str, program: &Path) -> Option<String> {
                     'r' => '\r',
                     other => other,
                 };
-                chars.push((real, end));
+                chars.push((real, j + n.len_utf8()));
             }
             None => chars.push(('\\', exec.len())),
         }
@@ -337,21 +336,46 @@ pub fn replace_argv0(exec: &str, program: &Path) -> Option<String> {
     while chars.get(idx).is_some_and(|(c, _)| c.is_whitespace()) {
         idx += 1;
     }
-    let start = idx;
+    let mut program = String::new();
+    let mut started = false;
     let mut in_quotes = false;
     while let Some(&(c, _)) = chars.get(idx) {
         match c {
-            '"' => in_quotes = !in_quotes,
-            '\\' if in_quotes => idx += 1,
+            '"' => {
+                in_quotes = !in_quotes;
+                started = true;
+            }
+            '\\' if in_quotes => {
+                idx += 1;
+                if let Some(&(escaped, _)) = chars.get(idx) {
+                    program.push(escaped);
+                }
+            }
             c if c.is_whitespace() && !in_quotes => break,
-            _ => {}
+            c => {
+                program.push(c);
+                started = true;
+            }
         }
         idx += 1;
     }
-    if in_quotes || idx == start {
+    if in_quotes || !started {
         return None;
     }
-    let rest_from = chars[idx - 1].1;
+    let rest_from = chars[idx.min(chars.len()) - 1].1;
+    Some((program, rest_from))
+}
+
+/// The program an `Exec` value (as written in the file) runs.
+pub fn exec_argv0(exec: &str) -> Option<String> {
+    split_argv0(exec).map(|(program, _)| program)
+}
+
+/// `exec` (as written in the file) with its program replaced by `program`.
+/// Arguments and field codes after it stay as they were. `None` when the
+/// value has no program or an unterminated quote.
+pub fn replace_argv0(exec: &str, program: &Path) -> Option<String> {
+    let (_, rest_from) = split_argv0(exec)?;
     let mut line = exec_arg(&program.to_string_lossy());
     line.push_str(&exec[rest_from..]);
     Some(line)
@@ -411,6 +435,10 @@ Exec=foo %U\nDBusActivatable=true\n\n# actions\n[Desktop Action new]\nName=New\n
             "/new/app rest"
         );
         assert_eq!(replace_argv0("\"a\\sb\" arg", p).unwrap(), "/new/app arg");
+        assert_eq!(exec_argv0(r#""/o d/app" x"#).as_deref(), Some("/o d/app"));
+        assert_eq!(exec_argv0("nvim %F").as_deref(), Some("nvim"));
+        assert_eq!(exec_argv0(r#""a\\"b" x"#).as_deref(), Some("a\"b"));
+        assert_eq!(exec_argv0(""), None);
         assert_eq!(replace_argv0("", p), None);
         assert_eq!(replace_argv0("   ", p), None);
         assert_eq!(replace_argv0("\"open", p), None);

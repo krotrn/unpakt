@@ -528,9 +528,14 @@ fn self_update_replaces_the_command_line_binary() {
 
     let tmp = tempfile::tempdir().unwrap();
     let exe = install_binary_copy(tmp.path());
+    let fish = tmp.path().join(".config/fish/completions/unpakt.fish");
+    std::fs::create_dir_all(fish.parent().unwrap()).unwrap();
+    std::fs::write(&fish, "# old\n").unwrap();
     let repo = release_server(b"#!/bin/sh\necho new unpakt\n", None);
     let out = run_exe(&exe, tmp.path(), Some(&repo), &["self", "update"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // The new binary's output replaces the stale completion.
+    assert_eq!(std::fs::read_to_string(&fish).unwrap(), "new unpakt\n");
     assert_eq!(
         std::fs::read_to_string(&exe).unwrap(),
         "#!/bin/sh\necho new unpakt\n"

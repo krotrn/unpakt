@@ -4,7 +4,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -94,6 +94,16 @@ struct Host {
     xdg_config: PathBuf,
 }
 
+/// The AppImage this process runs from. `APPIMAGE` alone can be left over in a
+/// shell that once ran one, so the executable must also sit inside `APPDIR`.
+fn appimage_in_use(
+    appimage: Option<PathBuf>,
+    appdir: Option<PathBuf>,
+    exe: &Path,
+) -> Option<PathBuf> {
+    appimage.filter(|_| appdir.is_some_and(|dir| exe.starts_with(dir)))
+}
+
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|v| !v.is_empty())
@@ -111,8 +121,12 @@ impl Host {
             .context("cannot find the home directory")?;
         let home = home.canonicalize().unwrap_or(home);
         Ok(Host {
-            exe,
-            appimage: env_path("APPIMAGE"),
+            exe: exe.clone(),
+            appimage: appimage_in_use(
+                env_path("APPIMAGE"),
+                env_path("APPDIR").and_then(|d| d.canonicalize().ok()),
+                &exe,
+            ),
             cargo_home: env_path("CARGO_HOME").unwrap_or_else(|| home.join(".cargo")),
             xdg_data: env_path("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")),
             xdg_config: env_path("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
@@ -269,11 +283,11 @@ fn current_version() -> Version {
 }
 
 fn repo_url() -> String {
-    // Tests point this at a local server.
-    std::env::var("UNPAKT_REPO_URL")
+    // Tests point this at a local server; a release build always uses GitHub.
+    let over = std::env::var("UNPAKT_REPO_URL")
         .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_REPO_URL.into())
+        .filter(|v| cfg!(debug_assertions) && !v.is_empty());
+    over.unwrap_or_else(|| DEFAULT_REPO_URL.into())
         .trim_end_matches('/')
         .to_string()
 }
@@ -317,7 +331,8 @@ impl Latest {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn is_root() -> bool {
-    fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0)
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// `program`, run through sudo unless we already are root.
@@ -360,6 +375,74 @@ fn replace_file(src: &Path, dest: &Path) -> Result<()> {
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755))?;
     tmp.persist(dest).map_err(|e| e.error)?;
     Ok(())
+}
+
+fn writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(dir.as_os_str().as_bytes())
+        // SAFETY: the pointer is a valid NUL-terminated string for the call.
+        .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::W_OK) } == 0)
+}
+
+/// Whether replacing `dest` needs sudo. Errors when it does and `scope` is not
+/// one the installer put under /usr/local, so nothing is downloaded in vain.
+fn needs_sudo_to_place(dest: &Path, scope: Option<Scope>) -> Result<bool> {
+    let dir = dest.parent().context("no directory to write into")?;
+    if writable(dir) {
+        return Ok(false);
+    }
+    match scope {
+        Some(Scope::System) if !is_root() => Ok(true),
+        _ => bail!("cannot write in {} (try as root)", dir.display()),
+    }
+}
+
+/// Puts `src` at `dest`: a rename for a writable directory, else `install` via sudo.
+fn place_file(src: &Path, dest: &Path, sudo: bool) -> Result<()> {
+    if sudo {
+        run_inherited(privileged("install").arg("-m755").arg(src).arg(dest))
+    } else {
+        replace_file(src, dest)
+    }
+}
+
+/// The shell a completion file written by get.sh is for.
+fn completion_shell(file: &Path) -> Option<&'static str> {
+    let text = file.to_string_lossy();
+    if text.ends_with(".fish") {
+        Some("fish")
+    } else if text.contains("/zsh/") {
+        Some("zsh")
+    } else if text.contains("/bash-completion/") {
+        Some("bash")
+    } else {
+        None
+    }
+}
+
+/// Rewrites the completion files that exist with the ones from `exe`, so they
+/// match the new version. Failures leave the old file in place.
+fn refresh_completions(exe: &Path, files: &[PathBuf]) {
+    for file in files.iter().filter(|f| f.is_file()) {
+        let Some(shell) = completion_shell(file) else {
+            continue;
+        };
+        let out = Command::new(exe)
+            .args(["completion", shell])
+            .env("APPIMAGE_EXTRACT_AND_RUN", "1")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        if let Ok(out) = out
+            && out.status.success()
+            && !out.stdout.is_empty()
+        {
+            let tmp = file.with_extension("unpakt-new");
+            if fs::write(&tmp, &out.stdout).is_err() || fs::rename(&tmp, file).is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+    }
 }
 
 /// Unpacks a gzip tarball into `dest` and returns its single top-level
@@ -499,17 +582,36 @@ fn update(check: bool, yes: bool) -> Result<()> {
             if !yes {
                 confirm("update", &format!("Install {deb} with `sudo apt-get`?"))?;
             }
+            run_inherited(privileged("apt-get").arg("update"))?;
             run_inherited(privileged("apt-get").args(["install", "-y"]).arg(&path))?;
         }
-        Route::AppImage { path, .. } => {
+        Route::AppImage { path, managed } => {
+            let sudo = needs_sudo_to_place(&path, managed)?;
+            if sudo && !yes {
+                confirm(
+                    "update",
+                    &format!("Replace {} with `sudo install`?", path.display()),
+                )?;
+            }
             let name = format!("unpakt-{version}-x86_64.AppImage");
             let new = latest.fetch_asset(&http, &repo, &name, tmp.path())?;
-            replace_file(&new, &path)?;
+            place_file(&new, &path, sudo)?;
+            if let Some(scope) = managed {
+                refresh_completions(&path, &host.completion_files(scope));
+            }
             println!("updated {} to {version}", path.display());
         }
-        Route::Binary(_) => {
+        Route::Binary(scope) => {
+            let sudo = needs_sudo_to_place(&host.exe, Some(scope))?;
+            if sudo && !yes {
+                confirm(
+                    "update",
+                    &format!("Replace {} with `sudo install`?", host.exe.display()),
+                )?;
+            }
             let new = latest.fetch_asset(&http, &repo, &latest.binary_name(), tmp.path())?;
-            replace_file(&new, &host.exe)?;
+            place_file(&new, &host.exe, sudo)?;
+            refresh_completions(&host.exe, &host.completion_files(scope));
             println!("updated {} to {version}", host.exe.display());
         }
         Route::Source { prefix } => {
@@ -528,8 +630,14 @@ fn update(check: bool, yes: bool) -> Result<()> {
                 )?;
             }
             let url = format!("{repo}/archive/refs/tags/v{version}.tar.gz");
-            let archive = http.download(&url, tmp.path())?;
-            let unpacked = tmp.path().join("src");
+            // The build is large; /tmp is often a small tmpfs.
+            let cache = Layout::user()?.cache;
+            fs::create_dir_all(&cache)?;
+            let work = tempfile::Builder::new()
+                .prefix("self-update-")
+                .tempdir_in(&cache)?;
+            let archive = http.download(&url, work.path())?;
+            let unpacked = work.path().join("src");
             fs::create_dir(&unpacked)?;
             let tree = unpack_source(&archive.path, &unpacked)?;
             let mut cmd = Command::new("bash");
@@ -566,6 +674,10 @@ fn uninstall(purge: bool, yes: bool) -> Result<()> {
         confirm("uninstall", what)?;
     }
 
+    remove_install(&host, route)?;
+
+    // After the removal, so a failed one leaves the apps alone; this process
+    // keeps running once its own binary is unlinked.
     let layout = Layout::user()?;
     if purge {
         purge_data(&layout)?;
@@ -577,7 +689,10 @@ fn uninstall(purge: bool, yes: bool) -> Result<()> {
             layout.cache.display()
         );
     }
+    Ok(())
+}
 
+fn remove_install(host: &Host, route: Route) -> Result<()> {
     match route {
         Route::Pacman => {
             run_inherited(privileged("pacman").args(["-Rns", "unpakt"]))?;
@@ -589,9 +704,13 @@ fn uninstall(purge: bool, yes: bool) -> Result<()> {
             managed: Some(scope),
         } => {
             let bin = host.bin_dir(scope);
+            let real = fs::canonicalize(&path).ok();
             let mut files = vec![path.clone()];
             for link in ["unpakt", "unpakt-gui"].map(|n| bin.join(n)) {
-                if fs::read_link(&link).is_ok_and(|target| target == path) {
+                // Canonical, so a symlinked home still matches.
+                let points_here = fs::read_link(&link).is_ok_and(|t| t == path)
+                    || real.is_some() && fs::canonicalize(&link).ok() == real;
+                if fs::symlink_metadata(&link).is_ok_and(|m| m.is_symlink()) && points_here {
                     files.push(link);
                 }
             }
@@ -637,8 +756,9 @@ fn uninstall(purge: bool, yes: bool) -> Result<()> {
 }
 
 /// Removes every installed app through the engine, so launchers and commands
-/// go too, then unpakt's own directories. Nothing is deleted if an app can't
-/// be removed.
+/// go too, then unpakt's own directories. Apps are removed one by one, so those
+/// before a failing one are already gone; the directories are only deleted once
+/// every app is.
 fn purge_data(layout: &Layout) -> Result<()> {
     let mut engine = Engine::open_default()?;
     for app in engine.list()? {
@@ -660,19 +780,26 @@ fn purge_data(layout: &Layout) -> Result<()> {
 
 /// Takes the `[unpakt]` repository out of pacman.conf, where get.sh added it.
 fn drop_pacman_repo() -> Result<()> {
-    let text = fs::read_to_string(PACMAN_CONF).with_context(|| format!("reading {PACMAN_CONF}"))?;
+    let text = match fs::read_to_string(PACMAN_CONF) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {PACMAN_CONF}")),
+    };
     let cleaned = without_pacman_repo(&text);
     if cleaned == text {
         return Ok(());
     }
     let tmp = tempfile::NamedTempFile::new()?;
     fs::write(tmp.path(), cleaned)?;
+    // Staged beside the target and moved over it, so pacman.conf is never half-written.
+    let staged = format!("{PACMAN_CONF}.unpakt-new");
     run_inherited(
         privileged("install")
-            .args(["-m644"])
+            .arg("-m644")
             .arg(tmp.path())
-            .arg(PACMAN_CONF),
+            .arg(&staged),
     )?;
+    run_inherited(privileged("mv").arg("-f").arg(&staged).arg(PACMAN_CONF))?;
     println!("removed the [unpakt] repository from {PACMAN_CONF}");
     Ok(())
 }
@@ -721,6 +848,41 @@ mod tests {
             detect(&h, &nobody),
             Route::AppImage { managed: None, .. }
         ));
+    }
+
+    #[test]
+    fn stale_appimage_variable_is_ignored() {
+        let image = Some(PathBuf::from("/opt/x.AppImage"));
+        let inside = Path::new("/tmp/.mount_x/usr/bin/unpakt");
+        let dir = Some(PathBuf::from("/tmp/.mount_x"));
+        assert_eq!(appimage_in_use(image.clone(), dir.clone(), inside), image);
+        assert_eq!(appimage_in_use(image.clone(), None, inside), None);
+        assert_eq!(
+            appimage_in_use(image, dir, Path::new("/usr/bin/unpakt")),
+            None
+        );
+        assert_eq!(
+            appimage_in_use(None, Some("/tmp/.mount_x".into()), inside),
+            None
+        );
+    }
+
+    #[test]
+    fn completion_files_map_to_their_shell() {
+        let shell = |p: &str| completion_shell(Path::new(p));
+        assert_eq!(
+            shell("/h/.local/share/bash-completion/completions/unpakt"),
+            Some("bash")
+        );
+        assert_eq!(
+            shell("/usr/local/share/zsh/site-functions/_unpakt"),
+            Some("zsh")
+        );
+        assert_eq!(
+            shell("/h/.config/fish/completions/unpakt.fish"),
+            Some("fish")
+        );
+        assert_eq!(shell("/h/other"), None);
     }
 
     #[test]

@@ -113,10 +113,16 @@ fn failing_head_does_not_block_direct_url() {
     let root = tempfile::tempdir().unwrap();
     let layout = Layout::under(root.path());
     let bin = layout.bin.clone();
-    let engine = Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(bin.into_os_string())
-        .with_http(http);
+    let engine = Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin.into_os_string())
+    .with_http(http);
     let plan = engine.inspect(&url, AddOpts::default()).unwrap();
     assert_eq!(plan.marker, None);
     assert_eq!(plan.plan.label, "1.2.0");
@@ -237,10 +243,16 @@ fn engine_installs_from_mock_github() {
     let root = tempfile::tempdir().unwrap();
     let layout = Layout::under(root.path());
     let bin = layout.bin.clone();
-    let mut engine = Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(bin.into_os_string())
-        .with_http(Http::new(&forge.api_url(), None).unwrap());
+    let mut engine = Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin.into_os_string())
+    .with_http(Http::new(&forge.api_url(), None).unwrap());
     let plan = engine
         .inspect("https://github.com/o/r", AddOpts::default())
         .unwrap();

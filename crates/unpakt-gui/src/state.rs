@@ -403,7 +403,14 @@ mod tests {
     fn review_rows_follow_the_cli_summary() {
         let tmp = tempfile::tempdir().unwrap();
         let tarball = fixture_tarball(tmp.path());
-        let engine = Engine::new(Layout::under(tmp.path()), Host::detect()).unwrap();
+        let engine = Engine::new(
+            Layout::under(tmp.path()),
+            Host {
+                fuse2: true,
+                ..Host::detect()
+            },
+        )
+        .unwrap();
         let mut plan = engine
             .inspect(tarball.to_str().unwrap(), AddOpts::default())
             .unwrap();

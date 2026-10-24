@@ -29,9 +29,15 @@ fn png(width: u32) -> Vec<u8> {
 fn engine(root: &Path) -> Engine {
     let layout = Layout::under(root);
     let bin = layout.bin.clone();
-    Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(OsString::from(bin))
+    Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(OsString::from(bin))
 }
 
 fn tool_tarball(dir: &Path) -> PathBuf {
@@ -361,9 +367,15 @@ fn install_never_runs_a_package_posing_as_a_helper() {
     );
     let layout = Layout::under(root.path());
     let path_var = std::env::join_paths([sys.path(), layout.bin.as_path()]).unwrap();
-    let mut engine = Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(path_var);
+    let mut engine = Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(path_var);
     let plan = engine
         .inspect(
             tarball.to_str().unwrap(),
@@ -429,9 +441,15 @@ fn doctor_reports_problems() {
     assert!(!find(&engine, &name).ok);
 
     let other = Layout::under(root.path());
-    let engine = Engine::new(other, Host::detect())
-        .unwrap()
-        .with_path_var(OsString::from("/usr/bin"));
+    let engine = Engine::new(
+        other,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(OsString::from("/usr/bin"));
     assert!(!find(&engine, "bin-in-path").ok);
 }
 

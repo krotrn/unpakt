@@ -20,9 +20,15 @@ const REPO: &str = "https://github.com/o/r";
 fn engine(root: &Path) -> Engine {
     let layout = Layout::under(root);
     let bin = OsString::from(layout.bin.clone());
-    Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(bin)
+    Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
 }
 
 fn tool(dir: &Path, version: &str) -> PathBuf {
@@ -136,10 +142,16 @@ fn update_clears_stale_dirs_the_manifest_does_not_know() {
     let root = tempfile::tempdir().unwrap();
     let layout = Layout::under(root.path());
     let bin = OsString::from(layout.bin.clone());
-    let mut engine = Engine::new(layout.clone(), Host::detect())
-        .unwrap()
-        .with_path_var(bin)
-        .with_http(Http::new(&forge.api_url(), None).unwrap());
+    let mut engine = Engine::new(
+        layout.clone(),
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
+    .with_http(Http::new(&forge.api_url(), None).unwrap());
 
     let publish = |version: &str| {
         let name = format!("unpakt-fixture-rec-{version}.tar.gz");
@@ -215,11 +227,17 @@ fn cancelled_engine_install_and_download_leave_nothing_behind() {
     let cancel = Cancel::new();
     let layout = Layout::under(root.path());
     let bin = OsString::from(layout.bin.clone());
-    let engine = Engine::new(layout.clone(), Host::detect())
-        .unwrap()
-        .with_path_var(bin)
-        .with_http(Http::new(&forge.api_url(), None).unwrap())
-        .with_cancel(cancel.clone());
+    let engine = Engine::new(
+        layout.clone(),
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
+    .with_http(Http::new(&forge.api_url(), None).unwrap())
+    .with_cancel(cancel.clone());
     let name = "unpakt-fixture-rec-1.0.0.tar.gz";
     let path = tool(src.path(), "1.0.0");
     forge.publish("1.0.0", vec![(name.into(), std::fs::read(path).unwrap())]);
@@ -237,11 +255,17 @@ fn cancelled_engine_install_and_download_leave_nothing_behind() {
     // Cancelled between inspection and installation.
     let fresh = Cancel::new();
     let bin = OsString::from(layout.bin.clone());
-    let mut engine = Engine::new(layout.clone(), Host::detect())
-        .unwrap()
-        .with_path_var(bin)
-        .with_http(Http::new(&forge.api_url(), None).unwrap())
-        .with_cancel(fresh.clone());
+    let mut engine = Engine::new(
+        layout.clone(),
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
+    .with_http(Http::new(&forge.api_url(), None).unwrap())
+    .with_cancel(fresh.clone());
     let plan = engine.inspect(REPO, AddOpts::default()).unwrap();
     fresh.cancel();
     let err = engine.install(plan).unwrap_err();
@@ -258,10 +282,16 @@ fn old_download_dirs_are_swept_and_fresh_ones_kept() {
     let root = tempfile::tempdir().unwrap();
     let layout = Layout::under(root.path());
     let bin = OsString::from(layout.bin.clone());
-    let engine = Engine::new(layout.clone(), Host::detect())
-        .unwrap()
-        .with_path_var(bin)
-        .with_http(Http::new(&forge.api_url(), None).unwrap());
+    let engine = Engine::new(
+        layout.clone(),
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
+    .with_http(Http::new(&forge.api_url(), None).unwrap());
     let name = "unpakt-fixture-rec-1.0.0.tar.gz";
     let path = tool(src.path(), "1.0.0");
     forge.publish("1.0.0", vec![(name.into(), std::fs::read(path).unwrap())]);

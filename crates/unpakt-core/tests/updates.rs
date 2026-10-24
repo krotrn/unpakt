@@ -16,12 +16,22 @@ const REPO: &str = "https://github.com/o/r";
 const DESKTOP: &[u8] = b"[Desktop Entry]\nType=Application\nName=Unpakt Fixture Upd\nExec=AppRun %U\nIcon=unpakt-fixture-upd\nCategories=Utility;\n";
 
 fn engine(root: &Path, forge: &MockForge) -> Engine {
+    engine_with(root, forge, true)
+}
+
+fn engine_with(root: &Path, forge: &MockForge, fuse2: bool) -> Engine {
     let layout = Layout::under(root);
     let bin = OsString::from(layout.bin.clone());
-    Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(bin)
-        .with_http(Http::new(&forge.api_url(), None).unwrap())
+    Engine::new(
+        layout,
+        Host {
+            fuse2,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
+    .with_http(Http::new(&forge.api_url(), None).unwrap())
 }
 
 /// Publishes an AppImage whose payload differs per `version`.
@@ -72,6 +82,34 @@ fn download_dirs(layout: &Layout) -> usize {
     std::fs::read_dir(layout.cache.join("downloads"))
         .map(|d| d.count())
         .unwrap_or(0)
+}
+
+#[test]
+fn host_without_fuse_installs_a_wrapper_script() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine_with(root.path(), &forge, false);
+    let layout = engine.layout().clone();
+
+    publish(&forge, src.path(), "1.0.0");
+    let id = install_latest(&mut engine);
+
+    let entry = layout.bin.join(&id);
+    assert!(
+        !std::fs::symlink_metadata(&entry).unwrap().is_symlink(),
+        "no-FUSE hosts get a wrapper, not a link"
+    );
+    let script = std::fs::read_to_string(&entry).unwrap();
+    assert!(
+        script.contains("exec env APPIMAGE_EXTRACT_AND_RUN=1 "),
+        "{script}"
+    );
+    assert!(
+        exec_of(&layout, &id).starts_with("env APPIMAGE_EXTRACT_AND_RUN=1 "),
+        "{}",
+        exec_of(&layout, &id)
+    );
 }
 
 #[test]
@@ -435,10 +473,16 @@ fn failed_check_is_reported_not_up_to_date() {
     // Nothing listens on this API address.
     let layout = Layout::under(root.path());
     let bin = OsString::from(layout.bin.clone());
-    let broken = Engine::new(layout, Host::detect())
-        .unwrap()
-        .with_path_var(bin)
-        .with_http(Http::new("http://127.0.0.1:1", None).unwrap());
+    let broken = Engine::new(
+        layout,
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(bin)
+    .with_http(Http::new("http://127.0.0.1:1", None).unwrap());
     for which in [None, Some(id.as_str())] {
         let check = broken.check_updates(which).unwrap();
         assert!(check.updates.is_empty());
@@ -512,10 +556,16 @@ fn forced_shadowed_command_survives_update_and_rollback() {
     std::fs::create_dir_all(&other).unwrap();
     std::fs::write(other.join("unpakt-fixture-upd"), "system tool").unwrap();
     let path_var = std::env::join_paths([&other, &layout.bin]).unwrap();
-    let mut engine = Engine::new(layout.clone(), Host::detect())
-        .unwrap()
-        .with_path_var(path_var)
-        .with_http(Http::new(&forge.api_url(), None).unwrap());
+    let mut engine = Engine::new(
+        layout.clone(),
+        Host {
+            fuse2: true,
+            ..Host::detect()
+        },
+    )
+    .unwrap()
+    .with_path_var(path_var)
+    .with_http(Http::new(&forge.api_url(), None).unwrap());
 
     publish(&forge, src.path(), "1.0.0");
     let plain = engine.inspect(REPO, AddOpts::default()).unwrap();

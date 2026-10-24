@@ -493,10 +493,22 @@ impl Engine {
             )));
         }
         let current = self.current_version(&app)?;
-        if app.source.kind == SourceKind::Github {
-            let release = for_kind(app.source.kind).latest(&app.source, &self.http)?;
-            if newer_release(&app, &current, &release).is_none() {
-                return Ok(None);
+        let release = for_kind(app.source.kind).latest(&app.source, &self.http)?;
+        let newer = newer_release(&app, &current, &release);
+        if app.source.kind == SourceKind::Github && newer.is_none() {
+            return Ok(None);
+        }
+        // The release may already be installed (after a rollback): switch to
+        // it instead of fetching it again.
+        if newer.is_some()
+            && let Some(version) = release.version.as_deref()
+        {
+            let label = version_label(version);
+            if let Some(target) = versions.iter().find(|v| v.label == label)
+                && label != current.label
+            {
+                self.activate(&app, target, &files)?;
+                return Ok(Some(label));
             }
         }
 
@@ -517,7 +529,16 @@ impl Engine {
         let p = self.inspect(&app.source.location, opts)?;
         let _download = self.download_guard(&p.plan.artifact.path);
         let label = p.plan.label.clone();
-        if versions.iter().any(|v| v.label == label) {
+        if let Some(target) = versions.iter().find(|v| v.label == label) {
+            let fetched = Release {
+                version: p.plan.payload.version.clone(),
+                marker: p.marker.clone(),
+                assets: Vec::new(),
+            };
+            if label != current.label && newer_release(&app, &current, &fetched).is_some() {
+                self.activate(&app, target, &files)?;
+                return Ok(Some(label));
+            }
             return Ok(None);
         }
         // The release that was just fetched may differ from the one checked
@@ -616,6 +637,20 @@ impl Engine {
         let target = versions
             .get(pos + 1)
             .ok_or_else(|| Error::NotFound(format!("{id} has no older version to roll back to")))?;
+        self.activate(&app, target, &files)?;
+        Ok(target.label.clone())
+    }
+
+    /// Points `current` at the already installed `target` and re-integrates
+    /// it. The launcher entry and icon stay as installed; only what they run
+    /// changes.
+    fn activate(
+        &mut self,
+        app: &AppRecord,
+        target: &VersionRecord,
+        files: &[FileRecord],
+    ) -> Result<()> {
+        let id = app.id.as_str();
         let version_dir = self.layout.apps.join(id).join(&target.label);
         if std::fs::symlink_metadata(&version_dir).is_err() {
             return Err(Error::NotFound(format!(
@@ -624,7 +659,6 @@ impl Engine {
             )));
         }
 
-        // The launcher entry and icon stay as installed; only what they run changes.
         let desktop_src = files
             .iter()
             .find(|f| f.kind == FileKind::Desktop)
@@ -656,7 +690,7 @@ impl Engine {
                 command: app.command.as_deref(),
                 force: false,
                 no_fuse_appimage: app.format == FormatKind::AppImage && !self.host.fuse2,
-                owned: &files,
+                owned: files,
                 path_var: &self.path_var,
             },
             &mut txn,
@@ -665,7 +699,7 @@ impl Engine {
             .set_current(id, &target.label, &integration.files)?;
         txn.commit();
         self.refresh_desktop_database();
-        Ok(target.label.clone())
+        Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<AppRecord>> {

@@ -17,8 +17,9 @@ pub fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, String> {
 
 fn ignored(rel: &Path) -> bool {
     let s = rel.to_string_lossy();
-    const DB: [&str; 5] = [
+    const DB: [&str; 6] = [
         "share/unpakt/lock",
+        "share/unpakt/journal",
         "share/unpakt/db.sqlite",
         "share/unpakt/db.sqlite-wal",
         "share/unpakt/db.sqlite-shm",

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::{Comp, E, build_appimage, build_tarball, tree_snapshot};
+use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine};
 use unpakt_core::host::Host;
 use unpakt_core::{Error, Layout};
@@ -525,4 +526,25 @@ fn tarball_command_is_the_entry_file_name() {
     assert_eq!(plan.plan.id, "unpakt-fixture-pkg");
     assert_eq!(plan.command.as_deref(), Some("unpakt-fixture-real.sh"));
     engine.discard(plan);
+}
+
+#[test]
+fn remove_with_cancel_set_is_undone() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let cancel = Cancel::new();
+    let mut engine = engine(root.path()).with_cancel(cancel.clone());
+    let plan = engine
+        .inspect(
+            tool_tarball(src.path()).to_str().unwrap(),
+            AddOpts::default(),
+        )
+        .unwrap();
+    let id = engine.install(plan).unwrap().id;
+    let installed = tree_snapshot(root.path());
+
+    cancel.cancel();
+    assert!(matches!(engine.remove(&id), Err(Error::Interrupted)));
+    assert_eq!(tree_snapshot(root.path()), installed);
+    assert!(engine.get(&id).is_ok(), "the app is still recorded");
 }

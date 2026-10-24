@@ -1,0 +1,481 @@
+use percent_encoding::percent_decode_str;
+use unpakt_core::Error;
+use unpakt_core::cancel::Cancel;
+use unpakt_core::engine::{InstallPlan, UpdateInfo};
+use unpakt_core::manifest::AppRecord;
+use unpakt_core::progress::Progress;
+
+use crate::worker::{Event, Op};
+
+/// Turns pasted or typed input into the URL or path it names. Surrounding
+/// whitespace is dropped, `file://` URIs are decoded to a path, and empty
+/// input yields `None`.
+pub fn normalize_input(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.strip_prefix("file://") {
+        Some(path) => percent_decode_str(path)
+            .decode_utf8()
+            .ok()
+            .map(|decoded| decoded.into_owned()),
+        None => Some(trimmed.to_string()),
+    }
+}
+
+/// Download progress as a share of the total, clamped to `0.0..=1.0`. `None`
+/// when the total is unknown, so the view shows indeterminate progress.
+pub fn fraction(done: u64, total: Option<u64>) -> Option<f64> {
+    match total {
+        None | Some(0) => None,
+        Some(total) => Some((done as f64 / total as f64).clamp(0.0, 1.0)),
+    }
+}
+
+/// The installed label, followed by the package's own version string in
+/// parentheses when that differs. Same rule as the CLI summary.
+fn version_text(label: &str, raw: Option<&str>) -> String {
+    match raw {
+        Some(raw) if raw != label => format!("{label} ({raw})"),
+        _ => label.to_string(),
+    }
+}
+
+/// The rows of the review screen, in display order. Warnings are not rows;
+/// the view lists them separately.
+pub fn review_rows(p: &InstallPlan) -> Vec<(&'static str, String)> {
+    let plan = &p.plan;
+    vec![
+        ("Name", plan.name.clone()),
+        (
+            "Version",
+            version_text(&plan.label, plan.payload.version.as_deref()),
+        ),
+        ("App id", plan.id.clone()),
+        ("Source", p.source.location.clone()),
+        ("File", plan.artifact.file_name.clone()),
+        (
+            "Format",
+            format!("{} → {}", plan.payload.format.as_str(), p.backend),
+        ),
+        (
+            "Command",
+            p.command.clone().unwrap_or_else(|| "none".into()),
+        ),
+        (
+            "Launcher entry",
+            if p.want_desktop { "yes" } else { "no" }.into(),
+        ),
+    ]
+}
+
+/// One line of the installed-apps list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub format: String,
+    /// The latest version, when it differs from the installed one.
+    pub update: Option<String>,
+}
+
+/// The installed apps for the list view, sorted by name ignoring case.
+pub fn app_rows(apps: &[AppRecord], updates: &[UpdateInfo]) -> Vec<AppRow> {
+    let mut rows: Vec<AppRow> = apps
+        .iter()
+        .map(|app| AppRow {
+            id: app.id.clone(),
+            name: app.name.clone(),
+            version: app.current.clone(),
+            format: app.format.as_str().to_string(),
+            update: updates
+                .iter()
+                .find(|u| u.id == app.id)
+                .map(|u| u.latest.clone()),
+        })
+        .collect();
+    rows.sort_by_key(|row| row.name.to_lowercase());
+    rows
+}
+
+/// What the engine is doing right now, for the progress view.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Busy {
+    #[default]
+    Idle,
+    Working {
+        op: Op,
+        label: String,
+        fraction: Option<f64>,
+        waiting: bool,
+    },
+}
+
+/// The window's state. The view sends the command returned by `start` and
+/// applies the `Effect` returned by `on_event`.
+#[derive(Debug, Default)]
+pub struct Model {
+    pub busy: Busy,
+    pub close_requested: bool,
+    /// Cancels the running operation.
+    cancel: Option<Cancel>,
+}
+
+/// What the view must do after an event.
+#[derive(Debug, PartialEq)]
+pub enum Effect {
+    None,
+    ShowReview,
+    ShowError {
+        title: String,
+        body: String,
+        inspect_again: bool,
+    },
+    Toast(String),
+    Close,
+}
+
+impl Model {
+    /// Marks `op` as running and returns the cancel handle to send with its command.
+    pub fn start(&mut self, op: Op) -> Cancel {
+        let cancel = Cancel::new();
+        self.busy = Busy::Working {
+            op,
+            label: starting_label(op).into(),
+            fraction: None,
+            waiting: false,
+        };
+        self.cancel = Some(cancel.clone());
+        cancel
+    }
+
+    /// Applies one worker event to the state and says what the view must do.
+    pub fn on_event(&mut self, e: &Event) -> Effect {
+        if let Event::Progress(progress) = e {
+            if let Busy::Working {
+                label,
+                fraction: share,
+                waiting,
+                ..
+            } = &mut self.busy
+            {
+                *waiting = matches!(progress, Progress::WaitingForLock);
+                *share = None;
+                *label = match progress {
+                    Progress::WaitingForLock => {
+                        "Waiting for another unpakt operation to finish…".into()
+                    }
+                    Progress::Fetching => "Looking up the release…".into(),
+                    Progress::Downloading { file, done, total } => {
+                        *share = fraction(*done, *total);
+                        format!("Downloading {file}…")
+                    }
+                    Progress::Inspecting => "Inspecting…".into(),
+                    Progress::Installing => "Installing…".into(),
+                };
+            }
+            return Effect::None;
+        }
+
+        let was_working = matches!(self.busy, Busy::Working { .. });
+        self.busy = Busy::Idle;
+        self.cancel = None;
+
+        let effect = match e {
+            Event::Failed {
+                error: Error::Interrupted,
+                ..
+            } => Effect::Toast("Cancelled".into()),
+            Event::Failed { op, error } => Effect::ShowError {
+                title: failure_title(*op).into(),
+                body: error.to_string(),
+                inspect_again: *op == Op::Install && matches!(error, Error::Conflict(_)),
+            },
+            Event::Inspected(_) => Effect::ShowReview,
+            _ => Effect::None,
+        };
+
+        if was_working && self.close_requested {
+            Effect::Close
+        } else {
+            effect
+        }
+    }
+
+    /// Returns `true` when the window may close now. While an operation runs,
+    /// it is cancelled instead and the close waits for its final event.
+    pub fn request_close(&mut self) -> bool {
+        if let Busy::Working { .. } = self.busy {
+            self.close_requested = true;
+            if let Some(cancel) = &self.cancel {
+                cancel.cancel();
+            }
+            false
+        } else {
+            true
+        }
+    }
+}
+
+fn starting_label(op: Op) -> &'static str {
+    match op {
+        Op::Inspect => "Inspecting…",
+        Op::Install => "Installing…",
+        Op::Check => "Checking for updates…",
+        Op::Update => "Updating…",
+        Op::Rollback => "Rolling back…",
+        Op::Remove => "Removing…",
+        Op::List => "Loading…",
+    }
+}
+
+fn failure_title(op: Op) -> &'static str {
+    match op {
+        Op::Inspect => "Could not read this input",
+        Op::Install => "Could not install",
+        Op::Check => "Could not check for updates",
+        Op::Update => "Could not update",
+        Op::Rollback => "Could not roll back",
+        Op::Remove => "Could not remove",
+        Op::List => "Could not load apps",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use unpakt_core::Layout;
+    use unpakt_core::engine::{AddOpts, Engine};
+    use unpakt_core::host::Host;
+    use unpakt_core::manifest::AppRecord;
+    use unpakt_core::model::{FormatKind, SourceCfg, SourceKind};
+
+    #[test]
+    fn normalize_input_cases() {
+        assert_eq!(
+            normalize_input("  https://github.com/o/r \n"),
+            Some("https://github.com/o/r".into())
+        );
+        assert_eq!(normalize_input("\n\t "), None);
+        assert_eq!(
+            normalize_input("file:///home/u/My%20Apps/x.AppImage"),
+            Some("/home/u/My Apps/x.AppImage".into())
+        );
+        assert_eq!(
+            normalize_input("/tmp/x.tar.gz"),
+            Some("/tmp/x.tar.gz".into())
+        );
+    }
+
+    #[test]
+    fn fraction_without_total_is_none() {
+        assert_eq!(fraction(10, None), None);
+        assert_eq!(fraction(10, Some(0)), None);
+        assert_eq!(fraction(5, Some(10)), Some(0.5));
+        assert_eq!(fraction(20, Some(10)), Some(1.0));
+    }
+
+    fn fixture_tarball(dir: &Path) -> PathBuf {
+        let path = dir.join("unpakt-fixture-tool-1.0.tar.gz");
+        let enc = GzEncoder::new(File::create(&path).unwrap(), Compression::fast());
+        let mut builder = tar::Builder::new(enc);
+        let body = b"#!/bin/sh\necho hi\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_entry_type(tar::EntryType::Regular);
+        builder
+            .append_data(
+                &mut header,
+                "unpakt-fixture-tool/bin/unpakt-fixture-tool",
+                &body[..],
+            )
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    fn app(id: &str, name: &str, current: &str) -> AppRecord {
+        AppRecord {
+            id: id.into(),
+            name: name.into(),
+            format: FormatKind::Tarball,
+            backend: "tarball".into(),
+            source: SourceCfg {
+                kind: SourceKind::LocalFile,
+                location: "/x.tar.gz".into(),
+                pattern: None,
+            },
+            current: current.into(),
+            desktop: false,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn review_rows_follow_the_cli_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tarball = fixture_tarball(tmp.path());
+        let engine = Engine::new(Layout::under(tmp.path()), Host::detect()).unwrap();
+        let mut plan = engine
+            .inspect(tarball.to_str().unwrap(), AddOpts::default())
+            .unwrap();
+
+        let names: Vec<&str> = review_rows(&plan).iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            [
+                "Name",
+                "Version",
+                "App id",
+                "Source",
+                "File",
+                "Format",
+                "Command",
+                "Launcher entry",
+            ]
+        );
+        let rows = review_rows(&plan);
+        assert_eq!(rows[0].1, plan.plan.name);
+        assert_eq!(rows[1].1, plan.plan.label);
+        assert_eq!(rows[2].1, plan.plan.id);
+        assert_eq!(rows[3].1, plan.source.location);
+        assert_eq!(rows[4].1, plan.plan.artifact.file_name);
+        assert_eq!(rows[5].1, format!("tarball → {}", plan.backend));
+        assert_eq!(rows[6].1, "unpakt-fixture-tool");
+        assert_eq!(rows[7], ("Launcher entry", "no".to_string()));
+
+        plan.command = Some("unpakt-fixture-tool --run".into());
+        plan.want_desktop = true;
+        plan.plan.payload.version = Some("1.0.3-rc".into());
+        let rows = review_rows(&plan);
+        assert_eq!(rows[1].1, format!("{} (1.0.3-rc)", plan.plan.label));
+        assert_eq!(rows[6].1, "unpakt-fixture-tool --run");
+        assert_eq!(rows[7], ("Launcher entry", "yes".to_string()));
+    }
+
+    #[test]
+    fn app_rows_mark_updates_and_sort() {
+        let apps = [app("b", "b", "1.0"), app("a", "A", "0.9")];
+        let updates = [UpdateInfo {
+            id: "b".into(),
+            current: "1.0".into(),
+            latest: "2.0".into(),
+        }];
+        let rows = app_rows(&apps, &updates);
+        assert_eq!(
+            rows,
+            [
+                AppRow {
+                    id: "a".into(),
+                    name: "A".into(),
+                    version: "0.9".into(),
+                    format: "tarball".into(),
+                    update: None,
+                },
+                AppRow {
+                    id: "b".into(),
+                    name: "b".into(),
+                    version: "1.0".into(),
+                    format: "tarball".into(),
+                    update: Some("2.0".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn waiting_for_lock_sets_waiting_label() {
+        let mut m = Model::default();
+        m.start(Op::Remove);
+        m.on_event(&Event::Progress(Progress::WaitingForLock));
+        assert_eq!(
+            m.busy,
+            Busy::Working {
+                op: Op::Remove,
+                waiting: true,
+                label: "Waiting for another unpakt operation to finish…".into(),
+                fraction: None,
+            }
+        );
+    }
+
+    #[test]
+    fn downloading_reports_file_and_fraction() {
+        let mut m = Model::default();
+        m.start(Op::Install);
+        m.on_event(&Event::Progress(Progress::Downloading {
+            file: "tool.tar.gz".into(),
+            done: 25,
+            total: Some(100),
+        }));
+        assert_eq!(
+            m.busy,
+            Busy::Working {
+                op: Op::Install,
+                waiting: false,
+                label: "Downloading tool.tar.gz…".into(),
+                fraction: Some(0.25),
+            }
+        );
+    }
+
+    #[test]
+    fn conflict_on_install_offers_inspect_again() {
+        let mut m = Model::default();
+        m.start(Op::Install);
+        let effect = m.on_event(&Event::Failed {
+            op: Op::Install,
+            error: Error::Conflict("x".into()),
+        });
+        assert!(matches!(
+            effect,
+            Effect::ShowError {
+                inspect_again: true,
+                ..
+            }
+        ));
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn close_while_busy_cancels_and_defers() {
+        let mut m = Model::default();
+        let c = m.start(Op::Install);
+        assert!(!m.request_close());
+        assert!(c.is_cancelled());
+        assert_eq!(
+            m.on_event(&Event::Failed {
+                op: Op::Install,
+                error: Error::Interrupted,
+            }),
+            Effect::Close
+        );
+    }
+
+    #[test]
+    fn close_after_commit_won_keeps_the_install() {
+        let mut m = Model::default();
+        let c = m.start(Op::Install);
+        assert!(!m.request_close());
+        assert!(c.is_cancelled());
+        // The install had already committed, so the worker reports it and the
+        // window closes without any rollback.
+        assert_eq!(
+            m.on_event(&Event::Installed(app("a", "A", "1.0"))),
+            Effect::Close
+        );
+    }
+
+    #[test]
+    fn close_when_idle_is_immediate() {
+        assert!(Model::default().request_close());
+    }
+}

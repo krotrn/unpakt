@@ -2,6 +2,8 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::error::{Error, Result};
+
 const EXTENSIONS: &[&str] = &[
     ".appimage",
     ".tar.gz",
@@ -66,6 +68,23 @@ pub fn slug(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// A command name must be a single plain path component, so that joining it
+/// onto the bin dir can never leave that dir.
+pub fn validate_command(command: &str) -> Result<()> {
+    let mut comps = std::path::Path::new(command).components();
+    let single_normal = matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(n)), None) if n == std::ffi::OsStr::new(command)
+    );
+    if command.is_empty() || command.contains(['/', '\0']) || !single_normal {
+        return Err(Error::Refused(format!(
+            "invalid command name `{}`: use a single file name without `/`",
+            command.escape_debug()
+        )));
+    }
+    Ok(())
+}
+
 /// Makes a raw version string safe to use as a single path component.
 pub fn version_label(raw: &str) -> String {
     let stripped = match raw.strip_prefix('v') {
@@ -114,6 +133,15 @@ mod tests {
         assert_eq!(slug("Obsidian"), "obsidian");
         assert_eq!(slug("My App!"), "my-app");
         assert_eq!(slug("--Foo__Bar--"), "foo-bar");
+    }
+    #[test]
+    fn command_names() {
+        for ok in ["nvim", "my-tool", "tool.sh", "a b", "..x", "x.."] {
+            assert!(validate_command(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", ".", "..", "a/b", "/abs", "../x", "x/", "a\0b"] {
+            assert!(validate_command(bad).is_err(), "{bad:?}");
+        }
     }
     #[test]
     fn version_label_is_safe() {

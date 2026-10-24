@@ -8,6 +8,7 @@ use crate::desktop::{DesktopEntry, exec_line, field_codes};
 use crate::error::{Error, Result};
 use crate::manifest::{FileKind, FileRecord};
 use crate::model::{ExecKind, Icon};
+use crate::naming::validate_command;
 use crate::paths::Layout;
 use crate::txn::Txn;
 
@@ -127,6 +128,7 @@ fn is_owned(owned: &[FileRecord], p: &Path) -> bool {
 /// Fails on a foreign file unless forced; otherwise moves a foreign file aside
 /// so that rollback restores it.
 fn claim(p: &Path, req: &IntegrateReq, txn: &mut Txn) -> Result<()> {
+    refuse_unless_file_or_link(p)?;
     if exists(p) && !is_owned(req.owned, p) {
         if !req.force {
             return Err(Error::Conflict(format!(
@@ -137,6 +139,17 @@ fn claim(p: &Path, req: &IntegrateReq, txn: &mut Txn) -> Result<()> {
         txn.remove_file(p)?;
     }
     Ok(())
+}
+
+/// Directories and special files are never ours to replace, forced or not.
+fn refuse_unless_file_or_link(p: &Path) -> Result<()> {
+    match fs::symlink_metadata(p) {
+        Ok(m) if !m.is_file() && !m.is_symlink() => Err(Error::Refused(format!(
+            "{} is not a regular file or symlink; refusing to replace it",
+            p.display()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn wrapper(exec: &Path) -> String {
@@ -163,6 +176,9 @@ pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<I
             ));
         }
     }
+    if let Some(command) = req.command {
+        validate_command(command)?;
+    }
     let bin_path = req.command.map(|c| layout.bin.join(c));
 
     // Refuse before touching anything.
@@ -174,18 +190,17 @@ pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<I
             dir.join(command).display()
         )));
     }
-    if !req.force {
-        let mut targets = vec![bin_path.as_deref(), icon_path.as_deref()];
-        if req.want_desktop {
-            targets.push(Some(&desktop_path));
-        }
-        for p in targets.into_iter().flatten() {
-            if exists(p) && !is_owned(req.owned, p) {
-                return Err(Error::Conflict(format!(
-                    "{} already exists and is not managed by unpakt; use --force to replace it",
-                    p.display()
-                )));
-            }
+    let mut targets = vec![bin_path.as_deref(), icon_path.as_deref()];
+    if req.want_desktop {
+        targets.push(Some(&desktop_path));
+    }
+    for p in targets.into_iter().flatten() {
+        refuse_unless_file_or_link(p)?;
+        if !req.force && exists(p) && !is_owned(req.owned, p) {
+            return Err(Error::Conflict(format!(
+                "{} already exists and is not managed by unpakt; use --force to replace it",
+                p.display()
+            )));
         }
     }
 

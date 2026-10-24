@@ -423,3 +423,60 @@ fn commit_after_pruning_logs_no_errors() {
     assert!(!layout.icons.join("48x48").exists());
     assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+#[test]
+fn hostile_command_names_are_refused() {
+    let (dir, layout, exec) = setup();
+    let pv = OsString::from(&layout.bin);
+    let victim = dir.path().join("victim");
+    fs::create_dir_all(&victim).unwrap();
+    fs::write(victim.join("keep"), "precious").unwrap();
+    let before = tree_snapshot(dir.path());
+    let absolute = victim.to_string_lossy().into_owned();
+    for command in [
+        "../../victim",
+        "..",
+        ".",
+        "",
+        "a/b",
+        "sub/",
+        "nul\0byte",
+        absolute.as_str(),
+    ] {
+        for force in [false, true] {
+            let mut r = req(&exec, &pv);
+            r.command = Some(command);
+            r.force = force;
+            let mut txn = Txn::new();
+            let err = integrate(&layout, &r, &mut txn).unwrap_err();
+            assert!(matches!(err, Error::Refused(_)), "{command:?}: {err:?}");
+            drop(txn);
+        }
+    }
+    assert_eq!(tree_snapshot(dir.path()), before);
+}
+
+#[test]
+fn force_never_replaces_a_directory_at_the_bin_target() {
+    let (dir, layout, exec) = setup();
+    let pv = OsString::from(&layout.bin);
+    let target = layout.bin.join("unpakt-fixture-foo");
+    fs::create_dir_all(target.join("inner")).unwrap();
+    fs::write(target.join("inner/keep"), "precious").unwrap();
+    let before = tree_snapshot(dir.path());
+
+    let mut r = req(&exec, &pv);
+    r.force = true;
+    let mut txn = Txn::new();
+    let err = integrate(&layout, &r, &mut txn).unwrap_err();
+    assert!(
+        matches!(err, Error::Refused(_) | Error::Conflict(_)),
+        "{err:?}"
+    );
+    drop(txn);
+    assert_eq!(tree_snapshot(dir.path()), before);
+    assert_eq!(
+        fs::read_to_string(target.join("inner/keep")).unwrap(),
+        "precious"
+    );
+}

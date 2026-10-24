@@ -145,8 +145,11 @@ impl Txn {
         Ok(())
     }
 
-    /// Removes a file or symlink (as a link); undo restores it.
+    /// Removes a file or symlink (as a link), never a directory; undo restores it.
     pub fn remove_file(&mut self, p: &Path) -> Result<()> {
+        if fs::symlink_metadata(p).at(p)?.file_type().is_dir() {
+            return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory)).at(p);
+        }
         self.move_aside(p, "bak")
     }
 

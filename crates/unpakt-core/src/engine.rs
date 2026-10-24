@@ -18,7 +18,7 @@ use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
 use crate::manifest::{AppRecord, FileKind, FileRecord, Manifest, VersionRecord};
 use crate::model::{Artifact, FormatKind, Icon, Release, SourceCfg, SourceKind};
-use crate::naming::{slug, version_label};
+use crate::naming::{slug, validate_command, version_label};
 use crate::select::choose;
 use crate::source::{for_kind, resolve};
 use crate::version::is_newer;
@@ -241,6 +241,9 @@ impl Engine {
     }
 
     pub fn inspect(&self, input: &str, opts: AddOpts) -> Result<InstallPlan> {
+        if let Some(command) = &opts.command {
+            validate_command(command)?;
+        }
         let (plugin, source) = resolve(input)?;
         let pattern = opts
             .pattern

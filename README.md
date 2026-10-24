@@ -33,8 +33,13 @@ rollback and remove actions.
 
   `SigLevel = Optional TrustAll` is for an unsigned repository. Once the
   repository is signed, import its key and use the default `SigLevel`.
-- AUR: `unpakt`.
-- From source: `cargo install unpakt-cli` (command line only).
+- AUR: `unpakt`, once it is published there.
+- From source: `cargo install unpakt-cli` (command line only), once the crate
+  is published on crates.io.
+
+The AppImage runs the GUI by default. To use the command line from it, run
+`./unpakt-X.Y.Z-x86_64.AppImage cli <args>`, or call it through a symlink
+named `unpakt`.
 
 ## Verify a download
 
@@ -43,6 +48,11 @@ sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify <file> -R krotrn/unpakt
 minisign -Vm SHA256SUMS -P <key>   # when SHA256SUMS.minisig is published
 ```
+
+This verifies unpakt's own release files, not the apps unpakt installs (see
+[Known limitations](#known-limitations)). The minisign public key will be
+published with the release and in this README once signing is enabled; until
+then a release has no `SHA256SUMS.minisig`.
 
 ## Upgrade
 
@@ -61,11 +71,14 @@ Each is optional; the matching release step is skipped with a notice when it is
 not set.
 
 - `AUR_SSH_PRIVATE_KEY`: publish to the AUR
-- `ARCH_GPG_PRIVATE_KEY`: sign the pacman repository
+- `ARCH_GPG_PRIVATE_KEY`: sign the pacman repository; the key must not have a
+  passphrase
 - `MINISIGN_SECRET_KEY` and optional `MINISIGN_PASSWORD`: create
   `SHA256SUMS.minisig`
 - `CARGO_REGISTRY_TOKEN`, or the repository variable
-  `CRATES_IO_TRUSTED_PUBLISHING=true`: publish to crates.io
+  `CRATES_IO_TRUSTED_PUBLISHING=true`: publish to crates.io. The first
+  publish of each crate needs `CARGO_REGISTRY_TOKEN`, because trusted
+  publishing only works for crates that already exist.
 
 ## License
 

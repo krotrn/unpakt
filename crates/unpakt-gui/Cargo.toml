@@ -1,0 +1,24 @@
+[package]
+name = "unpakt-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "unpakt-gui"
+path = "src/main.rs"
+
+[dependencies]
+percent-encoding = "2.3.2"
+relm4 = { version = "0.11.0", features = ["libadwaita", "gnome_46"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+unpakt-core = { version = "0.1.0", path = "../unpakt-core" }
+
+[dev-dependencies]
+flate2 = "1.1.10"
+tar = "0.4.46"
+tempfile = "3.27.0"

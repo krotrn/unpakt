@@ -158,7 +158,7 @@ fn update_of_local_file_app_is_reported_not_attempted() {
 
     let all = run(tmp.path(), &["update", "--check"]);
     assert_eq!(all.status.code(), Some(0), "{}", stderr(&all));
-    assert_eq!(stdout(&all), "");
+    assert_eq!(stdout(&all), "all apps are up to date\n");
     let all = run(tmp.path(), &["update"]);
     assert_eq!(all.status.code(), Some(0), "{}", stderr(&all));
 
@@ -289,6 +289,29 @@ fn single_interrupt_at_the_prompt_exits_130_and_installs_nothing() {
     let apps = tmp.path().join(".local/share/unpakt/apps");
     let entries: Vec<_> = std::fs::read_dir(&apps).unwrap().collect();
     assert!(entries.is_empty(), "no app dir was created: {entries:?}");
+}
+
+#[test]
+fn update_check_says_so_when_nothing_is_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run(tmp.path(), &["update", "--check"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "all apps are up to date\n");
+}
+
+#[test]
+fn update_check_with_an_id_names_the_app() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    let id = stdout(&run(tmp.path(), &["list"]))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let out = run(tmp.path(), &["update", "--check", &id]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("{id} is up to date\n"));
 }
 
 #[test]

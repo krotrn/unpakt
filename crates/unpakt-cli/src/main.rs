@@ -242,6 +242,12 @@ fn run(command: Command) -> Result<()> {
             if check {
                 let found = engine.check_updates(id.as_deref())?;
                 output::print_updates(&found.updates);
+                if found.updates.is_empty() && found.failed.is_empty() {
+                    match id.as_deref() {
+                        Some(id) => println!("{id} is up to date"),
+                        None => println!("all apps are up to date"),
+                    }
+                }
                 report_failed_checks(&found.failed)?;
             } else {
                 update_apps(&mut engine, &interrupt, id.as_deref())?;

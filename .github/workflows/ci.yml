@@ -43,9 +43,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5, the versions the GUI targets.
+      # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5, the oldest versions the GUI supports.
       - name: Install GTK and libadwaita
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev desktop-file-utils
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -67,6 +67,31 @@ jobs:
             echo "GUI dependency leaked into unpakt-core"
             exit 1
           fi
+
+  # The newest end: Arch's own Rust, GTK and libadwaita packages.
+  arch:
+    name: Tests on Arch Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: archlinux:latest
+    steps:
+      - name: Install Rust, GTK and libadwaita
+        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita desktop-file-utils
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Some tests check read-only directories, which root can write anyway.
+      - name: Create an unprivileged user
+        run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+
+      - name: Tests
+        run: runuser -u builder -- env HOME=/home/builder cargo test --workspace --locked
+
+      - name: Clippy
+        run: runuser -u builder -- env HOME=/home/builder cargo clippy --workspace --all-targets --locked -- -D warnings
 
   msrv:
     name: Minimum Rust version

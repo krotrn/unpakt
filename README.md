@@ -19,9 +19,25 @@ rollback and remove actions.
 
 ## Install
 
-Every release is on the [releases page](https://github.com/krotrn/unpakt/releases).
-The commands below use the version in `v`; set it to the release you want.
-x86_64 only.
+One command for any distribution (x86_64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/krotrn/unpakt/main/get.sh | sh
+```
+
+It picks the package for your system: the pacman repository on Arch and its
+derivatives, the release `.deb` on Debian 13+ / Ubuntu 24.04+ and theirs, and
+the AppImage (with `unpakt` and `unpakt-gui` commands and a launcher entry, in
+`~/.local`) everywhere else. Without a graphical session, or where the desktop
+app can't run (glibc older than 2.39, musl), it installs only the static
+command-line binary into `~/.local/bin`. Every download is checked against the
+release's `SHA256SUMS`. Run it again to update. Options go after `sh -s --`,
+e.g. `curl -fsSL … | sh -s -- --cli-only`: `--cli-only`, `--gui` (desktop app
+even without a graphical session), `--dry-run` (show what it would run).
+
+Or install it yourself. Every release is on the
+[releases page](https://github.com/krotrn/unpakt/releases); the commands below
+use the version in `v`, so set it to the release you want.
 
 ```sh
 v=0.1.0

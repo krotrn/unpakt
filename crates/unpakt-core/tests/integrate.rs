@@ -527,3 +527,50 @@ fn no_fuse_command_is_a_wrapper_that_sets_extract_and_run() {
     txn.commit();
     assert!(fs::symlink_metadata(&bin).unwrap().is_symlink());
 }
+
+#[test]
+fn desktop_actions_run_the_installed_program() {
+    let (_dir, layout, _) = setup();
+    let pv = OsString::from(&layout.bin);
+    let exec = layout.apps.join("my app/current/app");
+    let mut r = req(&exec, &pv);
+    r.id = "x";
+    r.desktop_src = Some(
+        "[Desktop Entry]\nType=Application\nName=Orig\nExec=AppRun %U\nActions=new;quoted;broken;\n\n\
+[Desktop Action new]\nName=New window\nExec=AppRun --new-window %U\n\n\
+[Desktop Action quoted]\nName=Quoted\nExec=\"/usr/bin/other tool\" --flag \"two words\"\n\n\
+[Desktop Action broken]\nName=Broken\nExec=\"unterminated --x\n",
+    );
+    let mut txn = Txn::new();
+    integrate(&layout, &r, &mut txn).unwrap();
+    txn.commit();
+
+    let desktop = layout.applications.join("unpakt-x.desktop");
+    let text = fs::read_to_string(&desktop).unwrap();
+    let installed = format!("\"{}\"", exec.display());
+    assert!(
+        text.contains(&format!("Exec={installed} --new-window %U\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Exec={installed} --flag \"two words\"\n")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("AppRun") && !text.contains("/usr/bin/other"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Desktop Action broken") && !text.contains("unterminated"),
+        "{text}"
+    );
+    assert!(text.contains("Actions=new;quoted;\n"), "{text}");
+
+    match std::process::Command::new("desktop-file-validate")
+        .arg(&desktop)
+        .status()
+    {
+        Ok(s) => assert!(s.success(), "desktop-file-validate failed on:\n{text}"),
+        Err(_) => eprintln!("desktop-file-validate not installed; skipping validation"),
+    }
+}

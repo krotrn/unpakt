@@ -489,3 +489,70 @@ fn forced_shadowed_command_survives_update_and_rollback() {
     assert_eq!(engine.rollback(&id).unwrap(), "1.0.0");
     assert_eq!(engine.get(&id).unwrap().0.current, "1.0.0");
 }
+
+fn png(width: u32) -> Vec<u8> {
+    let mut data = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+    data.extend_from_slice(b"IHDR");
+    data.extend_from_slice(&width.to_be_bytes());
+    data.extend_from_slice(&width.to_be_bytes());
+    data
+}
+
+fn publish_with_icon(forge: &MockForge, tmp: &Path, version: &str, icon: Option<&[u8]>) {
+    let name = format!("Unpakt-Fixture-Upd-{version}.AppImage");
+    let elf = format!("\x7fELF-fixture-{version}");
+    let mut files = vec![
+        E::File("AppRun", elf.as_bytes(), 0o755),
+        E::File("unpakt-fixture-upd.desktop", DESKTOP, 0o644),
+    ];
+    if let Some(icon) = icon {
+        files.push(E::File("unpakt-fixture-upd.png", icon, 0o644));
+    }
+    let path = build_appimage(tmp, &name, &files);
+    forge.publish(version, vec![(name, std::fs::read(path).unwrap())]);
+}
+
+fn icon_files(layout: &Layout) -> Vec<String> {
+    tree_snapshot(&layout.icons)
+        .into_iter()
+        .filter(|(_, v)| v.starts_with("file:"))
+        .map(|(p, _)| p.display().to_string())
+        .collect()
+}
+
+#[test]
+fn update_drops_files_the_new_version_no_longer_ships() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = engine(root.path(), &forge);
+    let layout = engine.layout().clone();
+    // Downloads create the cache dir, which stays behind by design.
+    std::fs::create_dir_all(&layout.cache).unwrap();
+    let baseline = tree_snapshot(root.path());
+
+    publish_with_icon(&forge, src.path(), "1.0.0", Some(&png(16)));
+    let id = install_latest(&mut engine);
+    assert_eq!(icon_files(&layout).len(), 1);
+
+    publish_with_icon(&forge, src.path(), "2.0.0", Some(&png(256)));
+    engine.update(&id).unwrap();
+    let icons = icon_files(&layout);
+    assert_eq!(icons.len(), 1, "{icons:?}");
+    assert!(icons[0].contains("256x256"), "{icons:?}");
+    assert!(!layout.icons.join("16x16").exists());
+    let recorded = engine.get(&id).unwrap().2;
+    assert!(
+        recorded
+            .iter()
+            .all(|f| std::fs::symlink_metadata(&f.path).is_ok())
+    );
+
+    publish_with_icon(&forge, src.path(), "3.0.0", None);
+    engine.update(&id).unwrap();
+    assert!(icon_files(&layout).is_empty(), "{:?}", icon_files(&layout));
+    assert!(!layout.icons.join("256x256").exists());
+
+    engine.remove(&id).unwrap();
+    assert_eq!(tree_snapshot(root.path()), baseline);
+}

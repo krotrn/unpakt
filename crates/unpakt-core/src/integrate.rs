@@ -257,6 +257,20 @@ pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<I
         }
     }
 
+    // Files an earlier version created that this one does not.
+    for stale in req
+        .owned
+        .iter()
+        .filter(|o| !files.iter().any(|f| f.path == o.path))
+    {
+        if exists(&stale.path) {
+            txn.remove_file(&stale.path)?;
+        }
+        if stale.kind == FileKind::Icon {
+            prune_icon_dirs(&stale.path, txn)?;
+        }
+    }
+
     Ok(Integration { files, warnings })
 }
 

@@ -392,3 +392,25 @@ fn remove_reports_waiting_for_lock() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("waiting for another unpakt operation to finish…"));
 }
+
+#[test]
+fn completion_scripts_cover_every_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (shell, marker) in [
+        ("bash", "complete -F _unpakt"),
+        ("zsh", "#compdef unpakt"),
+        ("fish", "complete -c unpakt"),
+    ] {
+        let out = run(tmp.path(), &["completion", shell]);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let script = stdout(&out);
+        assert!(script.contains(marker), "{shell}: {script}");
+        for command in [
+            "add", "inspect", "list", "info", "update", "rollback", "remove", "doctor",
+        ] {
+            assert!(script.contains(command), "{shell} misses {command}");
+        }
+    }
+    let data = tmp.path().join(".local/share/unpakt");
+    assert!(!data.exists(), "completion must not create unpakt's data");
+}

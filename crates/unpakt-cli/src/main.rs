@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
@@ -90,6 +90,8 @@ enum Command {
     Rollback { id: String },
     /// Check the installation for problems
     Doctor,
+    /// Print the shell completion script for SHELL
+    Completion { shell: clap_complete::Shell },
 }
 
 /// A refusal to proceed, as opposed to a failure.
@@ -285,8 +287,15 @@ fn run(command: Command) -> Result<()> {
             println!("{label}");
         }
         Command::Doctor => output::print_checks(&engine.doctor()),
+        Command::Completion { .. } => unreachable!("handled before the engine opens"),
     }
     Ok(())
+}
+
+/// Generated from the command definition, so new commands and flags complete
+/// without editing a script.
+fn print_completion(shell: clap_complete::Shell) {
+    clap_complete::generate(shell, &mut Cli::command(), "unpakt", &mut std::io::stdout());
 }
 
 /// Updates one app, or every app that has an update. One app failing does not
@@ -368,7 +377,14 @@ fn exit_code(err: &anyhow::Error) -> u8 {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging(cli.verbose);
-    match run(cli.command) {
+    let result = match cli.command {
+        Command::Completion { shell } => {
+            print_completion(shell);
+            Ok(())
+        }
+        command => run(command),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if err.is::<NeedsConfirmation>() {

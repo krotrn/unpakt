@@ -60,6 +60,19 @@ jobs:
           desktop-file-validate /usr/share/applications/io.github.krotrn.Unpakt.desktop
           appstreamcli validate --no-net /usr/share/metainfo/io.github.krotrn.Unpakt.metainfo.xml
 
+      - name: Desktop app starts
+        run: |
+          pacman -S --noconfirm --needed python xorg-server-xvfb xorg-xwininfo dbus imagemagick ttf-dejavu
+          dbus-run-session -- python3 scripts/gui_smoke.py --screenshot gui-arch.png unpakt-gui
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gui-screenshot-arch-package
+          path: gui-arch.png
+          if-no-files-found: ignore
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -126,6 +139,9 @@ jobs:
       matrix:
         image: ["ubuntu:24.04", "ubuntu:26.04", "debian:13"]
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
       - name: Download package
         uses: actions/download-artifact@v8
         with:
@@ -149,6 +165,20 @@ jobs:
             echo "::error::unpakt-gui has unresolved libraries on ${{ matrix.image }}"
             exit 1
           fi
+
+      - name: Desktop app starts
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            python3 xvfb x11-utils dbus imagemagick fonts-dejavu-core
+          dbus-run-session -- python3 scripts/gui_smoke.py --screenshot gui.png unpakt-gui
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gui-screenshot-deb-${{ strategy.job-index }}
+          path: gui.png
+          if-no-files-found: ignore
 
   appimage:
     name: Build AppImage
@@ -195,3 +225,73 @@ jobs:
           name: appimage
           if-no-files-found: error
           path: packaging/appimage/out/*.AppImage
+
+  # The AppImage is what other distributions get: start its desktop app on them.
+  # Like every AppImage it leaves X11, xcb, Wayland, fontconfig, freetype,
+  # harfbuzz and fribidi to the system (AppImage's exclude list): any desktop has
+  # them (and the krb5 and gcrypt helpers libcom_err and libgpg-error), a bare
+  # container doesn't, so each image installs them.
+  appimage-gui:
+    name: AppImage desktop app on ${{ matrix.name }}
+    needs: appimage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: ${{ matrix.image }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Fedora
+            image: fedora:latest
+            install: >-
+              dnf install -y python3 xorg-x11-server-Xvfb xwininfo dbus-daemon dbus-tools
+              ImageMagick dejavu-sans-fonts libX11 libxcb fontconfig freetype harfbuzz fribidi
+              libwayland-client
+          - name: openSUSE Tumbleweed
+            image: opensuse/tumbleweed
+            install: >-
+              zypper --non-interactive install python3 xorg-x11-server-Xvfb xwininfo dbus-1
+              ImageMagick dejavu-fonts libX11-6 libxcb1 libfontconfig1 libfreetype6 libharfbuzz0
+              libfribidi0 libwayland-client0
+          - name: Arch Linux
+            image: archlinux:latest
+            install: >-
+              pacman -Syu --noconfirm --needed python xorg-server-xvfb xorg-xwininfo dbus
+              imagemagick ttf-dejavu libx11 libxcb fontconfig freetype2 harfbuzz fribidi wayland
+          - name: Debian 13
+            image: debian:13
+            install: >-
+              apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y
+              --no-install-recommends python3 xvfb x11-utils dbus imagemagick fonts-dejavu-core
+              libx11-6 libxcb1 libfontconfig1 libfreetype6 libharfbuzz0b libfribidi0 libwayland-client0
+              libcom-err2 libgpg-error0
+    steps:
+      - name: Install a headless display
+        run: ${{ matrix.install }}
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download AppImage
+        uses: actions/download-artifact@v8
+        with:
+          name: appimage
+          path: appimage
+
+      # The container has no FUSE, so run the image by extracting it.
+      - name: Desktop app starts
+        run: |
+          image=$(echo appimage/*.AppImage)
+          chmod +x "$image"
+          dbus-run-session -- python3 scripts/gui_smoke.py --screenshot gui.png -- "$image" --appimage-extract-and-run
+
+      - name: Upload screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gui-screenshot-appimage-${{ strategy.job-index }}
+          path: gui.png
+          if-no-files-found: ignore

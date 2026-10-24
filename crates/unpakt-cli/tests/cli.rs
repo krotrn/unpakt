@@ -147,3 +147,32 @@ fn update_of_local_file_app_is_reported_not_attempted() {
     assert_eq!(one.status.code(), Some(1));
     assert!(stderr(&one).contains("local file"), "{}", stderr(&one));
 }
+
+#[test]
+fn add_accepts_a_pattern_and_validates_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let bad = run(
+        tmp.path(),
+        &["add", "--yes", "--pattern", "(", tarball.to_str().unwrap()],
+    );
+    assert_eq!(bad.status.code(), Some(1), "{}", stderr(&bad));
+    assert!(
+        stderr(&bad).contains("invalid --pattern"),
+        "{}",
+        stderr(&bad)
+    );
+
+    let good = run(
+        tmp.path(),
+        &[
+            "add",
+            "--yes",
+            "--pattern",
+            "fixture-tool",
+            tarball.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(good.status.code(), Some(0), "{}", stderr(&good));
+    assert!(!stdout(&run(tmp.path(), &["list"])).is_empty());
+}

@@ -53,7 +53,7 @@ def release_changelog(text: str, new_version: str, today: str) -> str | None:
 
 
 def bump_version(new_version: str, root: Path = ROOT) -> int:
-    if not re.match(r"^\d+\.\d+\.\d+(?:[-a-zA-Z0-9\.]+)?$", new_version):
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", new_version):
         print(f"Invalid version: {new_version}")
         return 2
 

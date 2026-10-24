@@ -41,7 +41,8 @@ app can't run (glibc older than 2.39, musl), it installs only the static
 command-line binary into `~/.local/bin`. Every download is checked against the
 release's `SHA256SUMS`. Run it again to update. Options go after `sh -s --`,
 e.g. `curl -fsSL … | sh -s -- --cli-only`: `--cli-only`, `--gui` (desktop app
-even without a graphical session), `--dry-run` (show what it would run).
+even without a graphical session), `--source` (build from source, see
+[From source](#from-source)), `--dry-run` (show what it would run).
 
 Or install it yourself. Every release is on the
 [releases page](https://github.com/krotrn/unpakt/releases); the commands below
@@ -110,9 +111,16 @@ development packages.
 
 ```sh
 git clone https://github.com/krotrn/unpakt && cd unpakt
-cargo build --release --locked
-install -Dm755 target/release/unpakt target/release/unpakt-gui -t ~/.local/bin/
+./install.sh                    # builds, then installs into /usr/local (asks for sudo)
+PREFIX=~/.local ./install.sh    # or for your user only, without sudo
+./install.sh --cli-only         # only the command line: no GTK packages needed
+./install.sh --uninstall        # remove it again (use the same PREFIX)
 ```
+
+`install.sh` installs the commands, the launcher entry, the icon and shell
+completions. `get.sh --source` (`curl -fsSL … | sh -s -- --source`) installs
+the build dependencies with your package manager and runs `install.sh` for the
+latest release; it still needs Rust from <https://rustup.rs>.
 
 **Runtime requirements:** the command line needs nothing extra. The GUI needs
 GTK 4.14+ and libadwaita 1.5+ (the packages and the AppImage bring them). FUSE 2
@@ -120,8 +128,10 @@ is optional and lets unpakt run AppImages without extracting them.
 
 ## Upgrade
 
-Upgrade the same way you installed: `sudo pacman -Syu`, the newer `.deb`, the
-newer AppImage or binary. Installed apps and their records are kept.
+`unpakt self update` updates unpakt the same way it was installed (see
+[Updating or removing unpakt itself](#updating-or-removing-unpakt-itself)).
+Or by hand: `sudo pacman -Syu`, the newer `.deb`, AppImage or binary, or
+`install.sh` from a newer checkout. Installed apps and their records are kept.
 
 ## Shell completion
 
@@ -221,9 +231,13 @@ UNPAKT_ROOT=/tmp/try unpakt list
 ### Updating or removing unpakt itself
 
 `unpakt self update` updates unpakt the way it was installed: through the
-package manager, as an AppImage, as the static binary, or with the installer
-script. `unpakt self update --check` only checks for a newer version. `unpakt self uninstall` removes unpakt; add `--purge` to also remove
-the apps it installed and unpakt's own data.
+package manager, as an AppImage, as the static binary, or with `install.sh`
+(it rebuilds from the new release's source). `unpakt self update --check` only
+checks for a newer version. `unpakt self uninstall` removes unpakt; add
+`--purge` to also remove the apps it installed and unpakt's own data. Both ask
+before running anything with sudo; `--yes` skips the question. For `cargo
+install`, use cargo: `cargo install --locked unpakt-cli` or `cargo uninstall
+unpakt-cli`.
 
 ## Troubleshooting
 

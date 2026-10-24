@@ -214,9 +214,19 @@ interrupt.
 - `get.sh` is the one-command installer. It picks the pacman repository, the
   `.deb`, the AppImage or the static CLI binary for the system and checks
   downloads against `SHA256SUMS`. Its tests are in `scripts/tests`.
+- `install.sh` builds a source tree with cargo and installs it into `PREFIX`
+  (`/usr/local` by default), keeping a copy of itself in `PREFIX/lib/unpakt` so
+  `--uninstall` (and `unpakt self uninstall`) removes exactly what it wrote.
+  `get.sh --source` runs it for the latest release.
+- `unpakt self update` / `self uninstall` (`crates/unpakt-cli/src/selfmgmt.rs`)
+  detect which of these routes installed the running binary and update or
+  remove it the same way.
 - The static `x86_64-unknown-linux-musl` CLI binary is built by the `musl` CI
   job.
 
-Workflows in `.github/workflows`: `ci.yml` (lint, tests, Arch build, minimum
-Rust version, musl), `packages.yml` (package builds and smoke tests),
+Workflows in `.github/workflows`: `ci.yml` (lint, tests with coverage, Arch
+build, minimum Rust version, musl), `packages.yml` (package builds, install
+checks, and the desktop app started on a headless display on several
+distributions with `scripts/gui_smoke.py`), `codeql.yml`, `docs.yml` (this
+site),
 `version-bump.yml` and `release.yml` (see CONTRIBUTING.md).

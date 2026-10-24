@@ -8,12 +8,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `unpakt self update` and `unpakt self uninstall` update or remove unpakt
+  itself the way it was installed: the pacman repository, the `.deb`, the
+  AppImage or static binary from `get.sh`, or `install.sh`. `self update
+  --check` only checks; `self uninstall --purge` also removes the installed
+  apps and unpakt's data.
 - `unpakt completion bash|zsh|fish|elvish|powershell` prints a completion
   script generated from the command definitions. The Arch and Debian/Ubuntu
   packages install the bash, zsh and fish ones; `get.sh` installs bash and fish
   completions for your user.
 - `get.sh`, a one-command installer that picks the pacman repository, the
   release `.deb`, the AppImage or the command-line binary for your system.
+- `install.sh` builds unpakt from source and installs it into `/usr/local`
+  (or any `PREFIX`); `install.sh --uninstall` removes it again. `get.sh
+  --source` installs the build dependencies and runs it for the latest release.
 
 ## [0.1.0] - 2026-10-24
 

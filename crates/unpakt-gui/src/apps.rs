@@ -7,7 +7,63 @@ use relm4::gtk;
 use unpakt_core::manifest::AppRecord;
 
 use crate::app::{App, Msg};
-use crate::state::AppRow;
+use crate::state::{AppRow, Busy};
+
+/// The label, progress bar and Cancel button shown while an operation runs.
+/// The root page and the detail page each own one.
+pub struct BusyArea {
+    pub root: gtk::Box,
+    label: gtk::Label,
+    progress: gtk::ProgressBar,
+    cancel: gtk::Button,
+}
+
+impl BusyArea {
+    pub fn new(sender: &ComponentSender<App>) -> Self {
+        let label = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        let progress = gtk::ProgressBar::new();
+        progress.set_pulse_step(0.1);
+        let cancel = gtk::Button::with_label("Cancel");
+        cancel.set_halign(gtk::Align::End);
+        cancel.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Msg::CancelOp)
+        });
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.set_visible(false);
+        root.append(&label);
+        root.append(&progress);
+        root.append(&cancel);
+        BusyArea {
+            root,
+            label,
+            progress,
+            cancel,
+        }
+    }
+
+    /// Shows `busy`: hidden when idle, otherwise its label and progress, with
+    /// Cancel only when the operation can be cancelled.
+    pub fn show(&self, busy: &Busy, close_requested: bool) {
+        self.root.set_visible(*busy != Busy::Idle);
+        if let Busy::Working {
+            label, fraction, ..
+        } = busy
+        {
+            self.label.set_label(label);
+            if let Some(share) = fraction {
+                self.progress.set_fraction(*share);
+            }
+        }
+        self.cancel.set_visible(busy.cancellable());
+        self.cancel
+            .set_sensitive(busy.cancellable() && !close_requested);
+    }
+
+    pub fn pulse(&self) {
+        self.progress.pulse();
+    }
+}
 
 /// The list group, or a status page when nothing is installed.
 pub fn list(rows: &[AppRow], sender: &ComponentSender<App>) -> gtk::Widget {
@@ -57,6 +113,7 @@ pub struct Detail {
     version: adw::ActionRow,
     update: gtk::Button,
     actions: gtk::Box,
+    pub busy: BusyArea,
 }
 
 impl Detail {
@@ -108,7 +165,9 @@ impl Detail {
         content.set_margin_bottom(18);
         content.set_margin_start(16);
         content.set_margin_end(16);
+        let busy = BusyArea::new(sender);
         content.append(&list);
+        content.append(&busy.root);
         content.append(&actions);
         let clamp = adw::Clamp::builder()
             .maximum_size(560)
@@ -134,6 +193,7 @@ impl Detail {
             version,
             update,
             actions,
+            busy,
         };
         detail.set_update_known(has_update);
         detail

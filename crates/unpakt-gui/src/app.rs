@@ -11,7 +11,7 @@ use relm4::{Component, ComponentParts, ComponentSender, SimpleComponent, WorkerC
 use unpakt_core::engine::{InstallPlan, UpdateInfo};
 use unpakt_core::manifest::AppRecord;
 
-use crate::apps::{self, Detail};
+use crate::apps::{self, BusyArea, Detail};
 use crate::review;
 use crate::state::{Busy, Effect, Model, app_rows, normalize_input};
 use crate::worker::{Cmd, EngineWorker, Event, Op};
@@ -61,10 +61,7 @@ struct Ui {
     inspect: gtk::Button,
     browse: gtk::Button,
     list_slot: gtk::Box,
-    busy_box: gtk::Box,
-    busy_label: gtk::Label,
-    progress: gtk::ProgressBar,
-    cancel: gtk::Button,
+    busy: BusyArea,
 }
 
 impl SimpleComponent for App {
@@ -112,20 +109,7 @@ impl SimpleComponent for App {
         input_row.append(&entry);
         input_row.append(&inspect);
 
-        let busy_label = gtk::Label::builder().xalign(0.0).wrap(true).build();
-        let progress = gtk::ProgressBar::new();
-        progress.set_pulse_step(0.1);
-        let cancel = gtk::Button::with_label("Cancel");
-        cancel.set_halign(gtk::Align::End);
-        cancel.connect_clicked({
-            let sender = sender.clone();
-            move |_| sender.input(Msg::CancelOp)
-        });
-        let busy_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        busy_box.set_visible(false);
-        busy_box.append(&busy_label);
-        busy_box.append(&progress);
-        busy_box.append(&cancel);
+        let busy = BusyArea::new(&sender);
 
         let list_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
@@ -136,7 +120,7 @@ impl SimpleComponent for App {
         content.set_margin_end(16);
         content.append(&input_row);
         content.append(&browse);
-        content.append(&busy_box);
+        content.append(&busy.root);
         content.append(&list_slot);
         let clamp = adw::Clamp::builder()
             .maximum_size(560)
@@ -213,10 +197,7 @@ impl SimpleComponent for App {
                 inspect,
                 browse,
                 list_slot,
-                busy_box,
-                busy_label,
-                progress,
-                cancel,
+                busy,
             },
         };
         app.worker.emit(Cmd::List);
@@ -413,7 +394,10 @@ impl App {
         if matches!(event, Event::Progress(_))
             && matches!(self.model.busy, Busy::Working { fraction: None, .. })
         {
-            self.ui.progress.pulse();
+            self.ui.busy.pulse();
+            if let Some(detail) = &self.detail {
+                detail.busy.pulse();
+            }
         }
         match effect {
             Effect::None => {}
@@ -479,21 +463,11 @@ impl App {
         ui.entry.set_sensitive(idle);
         ui.inspect.set_sensitive(idle);
         ui.browse.set_sensitive(idle);
-        ui.busy_box.set_visible(!idle);
-        if let Busy::Working {
-            label, fraction, ..
-        } = &self.model.busy
-        {
-            ui.busy_label.set_label(label);
-            if let Some(share) = fraction {
-                ui.progress.set_fraction(*share);
-            }
-        }
+        let close_requested = self.model.close_requested;
+        ui.busy.show(&self.model.busy, close_requested);
         if let Some(detail) = &self.detail {
             detail.set_idle(idle);
+            detail.busy.show(&self.model.busy, close_requested);
         }
-        ui.cancel.set_visible(self.model.busy.cancellable());
-        ui.cancel
-            .set_sensitive(self.model.busy.cancellable() && !self.model.close_requested);
     }
 }

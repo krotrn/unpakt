@@ -1,3 +1,4 @@
 /target
 /.superpowers/
 /packaging/*/out/
+__pycache__/

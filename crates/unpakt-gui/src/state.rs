@@ -835,7 +835,13 @@ mod tests {
         };
         assert_eq!(input, "https://github.com/o/r");
         assert!(opts.no_bin);
-        assert!(matches!(m.busy, Busy::Working { op: Op::Inspect, .. }));
+        assert!(matches!(
+            m.busy,
+            Busy::Working {
+                op: Op::Inspect,
+                ..
+            }
+        ));
     }
 
     #[test]

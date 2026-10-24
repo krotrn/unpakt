@@ -6,7 +6,11 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 
 fn fixture_tarball(dir: &Path) -> PathBuf {
-    let path = dir.join("unpakt-fixture-tool-1.0.tar.gz");
+    fixture_tarball_named(dir, "unpakt-fixture-tool-1.0.tar.gz")
+}
+
+fn fixture_tarball_named(dir: &Path, file_name: &str) -> PathBuf {
+    let path = dir.join(file_name);
     let enc = GzEncoder::new(File::create(&path).unwrap(), Compression::fast());
     let mut builder = tar::Builder::new(enc);
     let body = b"#!/bin/sh\necho hi\n";
@@ -285,4 +289,38 @@ fn single_interrupt_at_the_prompt_exits_130_and_installs_nothing() {
     let apps = tmp.path().join(".local/share/unpakt/apps");
     let entries: Vec<_> = std::fs::read_dir(&apps).unwrap().collect();
     assert!(entries.is_empty(), "no app dir was created: {entries:?}");
+}
+
+#[test]
+fn summary_version_matches_info_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let out = run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let id = stdout(&run(tmp.path(), &["list"]))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let info = stdout(&run(tmp.path(), &["info", &id]));
+    let line = |text: &str| {
+        text.lines()
+            .find(|l| l.starts_with("version:"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(line(&stdout(&out)), line(&info), "{}\n{info}", stdout(&out));
+}
+
+#[test]
+fn summary_version_has_no_parentheses_when_label_is_the_raw_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let out = run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("\nversion: 1.0\n"),
+        "{}",
+        stdout(&out)
+    );
 }

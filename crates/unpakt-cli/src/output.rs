@@ -3,12 +3,21 @@ use unpakt_core::manifest::{AppRecord, FileRecord, VersionRecord};
 
 const RUNNER_UPS: usize = 3;
 
+/// The installed label, followed by the package's own version string in
+/// parentheses when that differs.
+fn version_text(label: &str, raw: Option<&str>) -> String {
+    match raw {
+        Some(raw) if raw != label => format!("{label} ({raw})"),
+        _ => label.to_string(),
+    }
+}
+
 pub fn print_summary(p: &InstallPlan) {
     let plan = &p.plan;
     println!("name:    {}", plan.name);
     println!(
         "version: {}",
-        plan.payload.version.as_deref().unwrap_or(&plan.label)
+        version_text(&plan.label, plan.payload.version.as_deref())
     );
     println!("id:      {}", plan.id);
     println!("source:  {}", p.source.location);
@@ -56,10 +65,7 @@ pub fn print_info(app: &AppRecord, versions: &[VersionRecord], files: &[FileReco
     println!("source:  {}", app.source.location);
     println!("current: {}", app.current);
     for v in versions {
-        match &v.version {
-            Some(version) => println!("version: {} ({version})", v.label),
-            None => println!("version: {}", v.label),
-        }
+        println!("version: {}", version_text(&v.label, v.version.as_deref()));
     }
     for f in files {
         println!("file:    {}", f.path.display());
@@ -76,5 +82,21 @@ pub fn print_checks(checks: &[Check]) {
 pub fn print_updates(updates: &[UpdateInfo]) {
     for u in updates {
         println!("{}  {}  ->  {}", u.id, u.current, u.latest);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_text;
+
+    #[test]
+    fn raw_version_follows_a_different_label() {
+        assert_eq!(version_text("0.12.6", Some("v0.12.6")), "0.12.6 (v0.12.6)");
+    }
+
+    #[test]
+    fn matching_or_missing_raw_version_shows_the_label_only() {
+        assert_eq!(version_text("0.12.6", Some("0.12.6")), "0.12.6");
+        assert_eq!(version_text("ab12cd34ef56", None), "ab12cd34ef56");
     }
 }

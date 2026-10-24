@@ -36,7 +36,7 @@ jobs:
           args: -color
 
       - name: Shell scripts (shellcheck)
-        run: shellcheck get.sh packaging/*/*.sh packaging/appimage/AppRun
+        run: shellcheck get.sh install.sh packaging/*/*.sh packaging/appimage/AppRun
 
       - name: Script tests (release scripts, get.sh)
         run: python3 -m unittest discover -s scripts/tests -v
@@ -56,13 +56,32 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Tests
-        run: cargo test --workspace --locked
+      - name: Tests with coverage
+        run: |
+          cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+          {
+            echo '### Coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

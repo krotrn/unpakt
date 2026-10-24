@@ -152,9 +152,14 @@ fn refuse_unless_file_or_link(p: &Path) -> Result<()> {
     }
 }
 
-fn wrapper(exec: &Path) -> String {
+fn wrapper(exec: &Path, extract_and_run: bool) -> String {
     let quoted = exec.to_string_lossy().replace('\'', "'\\''");
-    format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n")
+    let env = if extract_and_run {
+        "env APPIMAGE_EXTRACT_AND_RUN=1 "
+    } else {
+        ""
+    };
+    format!("#!/bin/sh\nexec {env}'{quoted}' \"$@\"\n")
 }
 
 pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<Integration> {
@@ -232,20 +237,20 @@ pub fn integrate(layout: &Layout, req: &IntegrateReq, txn: &mut Txn) -> Result<I
     if let Some(path) = bin_path {
         txn.create_dir_all(&layout.bin)?;
         claim(&path, req, txn)?;
-        match req.kind {
-            ExecKind::Elf => {
-                // An owned wrapper cannot be swapped in place.
-                if exists(&path) && !fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
-                    txn.remove_file(&path)?;
-                }
-                txn.symlink_swap(req.exec, &path)?;
+        // A script needs a wrapper to run, and so does an AppImage without
+        // FUSE, which must be told to extract itself.
+        if req.kind == ExecKind::Script || req.no_fuse_appimage {
+            if exists(&path) && fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
+                txn.remove_file(&path)?;
             }
-            ExecKind::Script => {
-                if exists(&path) && fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
-                    txn.remove_file(&path)?;
-                }
-                txn.write(&path, wrapper(req.exec).as_bytes(), 0o755)?;
+            let body = wrapper(req.exec, req.no_fuse_appimage);
+            txn.write(&path, body.as_bytes(), 0o755)?;
+        } else {
+            // An owned wrapper cannot be swapped in place.
+            if exists(&path) && !fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) {
+                txn.remove_file(&path)?;
             }
+            txn.symlink_swap(req.exec, &path)?;
         }
         files.push(FileRecord {
             path,

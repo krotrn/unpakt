@@ -165,3 +165,25 @@ fn owns_only_tracked_backups() {
     assert!(!t.owns(&stray));
     assert!(!t.owns(&f));
 }
+
+#[test]
+fn remove_file_refuses_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("d");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    fs::write(dir.join("sub/f"), "x").unwrap();
+    let before = tree_snapshot(root.path());
+    let mut txn = Txn::new();
+    assert!(txn.remove_file(&dir).is_err());
+    txn.commit();
+    assert_eq!(tree_snapshot(root.path()), before);
+
+    // A symlink to a directory is still a link and may be removed as one.
+    let link = root.path().join("l");
+    symlink(&dir, &link).unwrap();
+    let mut txn = Txn::new();
+    txn.remove_file(&link).unwrap();
+    txn.commit();
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(dir.join("sub/f").is_file());
+}

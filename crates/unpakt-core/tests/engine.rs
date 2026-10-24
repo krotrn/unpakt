@@ -429,3 +429,22 @@ fn doctor_reports_problems() {
         .with_path_var(OsString::from("/usr/bin"));
     assert!(!find(&engine, "bin-in-path").ok);
 }
+
+#[test]
+fn hostile_command_is_refused_at_inspect() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = tool_tarball(src.path());
+    let engine = engine(root.path());
+    let before = tree_snapshot(root.path());
+    for command in ["../../Documents", "/tmp/x", "a/b", "..", ""] {
+        let opts = AddOpts {
+            command: Some(command.into()),
+            force: true,
+            ..AddOpts::default()
+        };
+        let err = engine.inspect(tarball.to_str().unwrap(), opts).unwrap_err();
+        assert!(matches!(err, Error::Refused(_)), "{command:?}: {err:?}");
+    }
+    assert_eq!(tree_snapshot(root.path()), before);
+}

@@ -11,6 +11,8 @@ pub fn print_summary(p: &InstallPlan) {
         plan.payload.version.as_deref().unwrap_or(&plan.label)
     );
     println!("id:      {}", plan.id);
+    println!("source:  {}", p.source.location);
+    println!("asset:   {}", plan.artifact.file_name);
     println!("format:  {} -> {}", plan.payload.format.as_str(), p.backend);
     match &plan.entry {
         Some(entry) => println!("entry:   {}", entry.path.display()),
@@ -35,7 +37,14 @@ pub fn print_summary(p: &InstallPlan) {
 
 pub fn print_list(apps: &[AppRecord]) {
     for app in apps {
-        println!("{}  {}  {}", app.id, app.current, app.format.as_str());
+        println!(
+            "{}  {}  {}  {}  {}",
+            app.id,
+            app.current,
+            app.format.as_str(),
+            app.name,
+            app.source.location
+        );
     }
 }
 

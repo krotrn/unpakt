@@ -19,27 +19,85 @@ rollback and remove actions.
 
 ## Install
 
-- AppImage and static CLI binary: download from the
-  [GitHub releases](https://github.com/krotrn/unpakt/releases).
-- Debian/Ubuntu: install the `.deb` from the releases page.
-- Arch Linux: add the repository to `/etc/pacman.conf`, then
-  `pacman -Syu unpakt`:
+Every release is on the [releases page](https://github.com/krotrn/unpakt/releases).
+The commands below use the version in `v`; set it to the release you want.
+x86_64 only.
 
-  ```ini
-  [unpakt]
-  SigLevel = Optional TrustAll
-  Server = https://github.com/krotrn/unpakt/releases/download/arch-repo
-  ```
+```sh
+v=0.1.0
+```
 
-  `SigLevel = Optional TrustAll` is for an unsigned repository. Once the
-  repository is signed, import its key and use the default `SigLevel`.
-- AUR: `unpakt`, once it is published there.
-- From source: `cargo install unpakt-cli` (command line only), once the crate
-  is published on crates.io.
+### Arch Linux and derivatives
 
-The AppImage runs the GUI by default. To use the command line from it, run
-`./unpakt-X.Y.Z-x86_64.AppImage cli <args>`, or call it through a symlink
-named `unpakt`.
+```sh
+sudo tee -a /etc/pacman.conf >/dev/null <<'CONF'
+
+[unpakt]
+SigLevel = Optional TrustAll
+Server = https://github.com/krotrn/unpakt/releases/download/arch-repo
+CONF
+sudo pacman -Sy unpakt          # or, once it is on the AUR: yay -S unpakt
+sudo pacman -S --needed fuse2   # optional: run AppImages without extracting them
+```
+
+`SigLevel = Optional TrustAll` is for an unsigned repository. Once the
+repository is signed, import its key and use the default `SigLevel`.
+
+### Debian / Ubuntu
+
+Ubuntu 24.04 or newer, Debian 13 or newer.
+
+```sh
+curl -fLO "https://github.com/krotrn/unpakt/releases/download/v$v/unpakt_${v}-1_amd64.deb"
+sudo apt install "./unpakt_${v}-1_amd64.deb"
+```
+
+There is no apt repository yet: to update, install the newer `.deb` the same way.
+
+### AppImage (any distribution, GUI and command line)
+
+```sh
+curl -fLO "https://github.com/krotrn/unpakt/releases/download/v$v/unpakt-$v-x86_64.AppImage"
+chmod +x "unpakt-$v-x86_64.AppImage"
+./unpakt-$v-x86_64.AppImage              # the GUI
+./unpakt-$v-x86_64.AppImage cli --help   # the command line
+```
+
+To get an `unpakt` command, link to the AppImage under that name:
+`ln -s "$PWD/unpakt-$v-x86_64.AppImage" ~/.local/bin/unpakt`. Where FUSE
+isn't available (containers, some minimal systems), add
+`--appimage-extract-and-run` after the file name.
+
+### Command line only (any distribution)
+
+A static binary with no dependencies:
+
+```sh
+curl -fLo unpakt "https://github.com/krotrn/unpakt/releases/download/v$v/unpakt-$v-x86_64-linux-musl"
+install -Dm755 unpakt ~/.local/bin/unpakt
+```
+
+Or, once the crate is published on crates.io: `cargo install unpakt-cli`.
+
+### From source
+
+Needs Rust 1.93 or newer and the GTK 4 (4.14+) and libadwaita (1.5+)
+development packages.
+
+```sh
+git clone https://github.com/krotrn/unpakt && cd unpakt
+cargo build --release --locked
+install -Dm755 target/release/unpakt target/release/unpakt-gui -t ~/.local/bin/
+```
+
+**Runtime requirements:** the command line needs nothing extra. The GUI needs
+GTK 4.14+ and libadwaita 1.5+ (the packages and the AppImage bring them). FUSE 2
+is optional and lets unpakt run AppImages without extracting them.
+
+## Upgrade
+
+Upgrade the same way you installed: `sudo pacman -Syu`, the newer `.deb`, the
+newer AppImage or binary. Installed apps and their records are kept.
 
 ## Verify a download
 
@@ -53,11 +111,6 @@ This verifies unpakt's own release files, not the apps unpakt installs (see
 [Known limitations](#known-limitations)). The minisign public key will be
 published with the release and in this README once signing is enabled; until
 then a release has no `SHA256SUMS.minisig`.
-
-## Upgrade
-
-Replace the binary or AppImage, or update the package. Installed apps and their
-records are kept.
 
 ## Known limitations
 

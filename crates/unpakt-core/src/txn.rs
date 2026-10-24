@@ -1,5 +1,7 @@
 use crate::cancel::Cancel;
 use crate::error::{IoResultExt, Result};
+use crate::journal::{Intent, Journal};
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -31,7 +33,8 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
     }
 }
 
-enum Undo {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Undo {
     /// A directory this transaction created.
     RemoveDir(PathBuf),
     /// A path created inside this transaction.
@@ -49,6 +52,7 @@ pub struct Txn {
     log: Vec<Undo>,
     committed: bool,
     cancel: Cancel,
+    journal: Option<Journal>,
 }
 
 impl Default for Txn {
@@ -69,7 +73,25 @@ impl Txn {
             log: Vec::new(),
             committed: false,
             cancel,
+            journal: None,
         }
+    }
+
+    /// Like [`Txn::with_cancel`], but every step is written to a journal in
+    /// `dir` before it runs, so a crash can be undone or finished later.
+    pub fn journaled(cancel: Cancel, dir: &Path, intent: Intent) -> Result<Txn> {
+        let mut txn = Txn::with_cancel(cancel);
+        txn.journal = Some(Journal::create(dir, &intent)?);
+        Ok(txn)
+    }
+
+    /// Records `step` in the journal (if any), then in memory. Call before acting.
+    fn note(&mut self, step: Undo) -> Result<()> {
+        if let Some(j) = &mut self.journal {
+            j.record(&step)?;
+        }
+        self.log.push(step);
+        Ok(())
     }
 
     /// The cancellation flag that loops working for this transaction poll.
@@ -96,8 +118,9 @@ impl Txn {
             cur = c.parent();
         }
         for dir in missing.into_iter().rev() {
+            self.note(Undo::RemoveDir(dir.clone()))?;
             match fs::create_dir(&dir) {
-                Ok(()) => self.log.push(Undo::RemoveDir(dir)),
+                Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e).at(&dir),
             }
@@ -108,19 +131,24 @@ impl Txn {
     /// Creates the single directory `p`, which must not exist yet. Undo
     /// removes it with whatever was put inside.
     pub fn create_dir_new(&mut self, p: &Path) -> Result<()> {
-        fs::create_dir(p).at(p)?;
-        self.log.push(Undo::RemoveNew(p.to_path_buf()));
-        Ok(())
+        if exists_nofollow(p) {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)).at(p);
+        }
+        self.note(Undo::RemoveNew(p.to_path_buf()))?;
+        fs::create_dir(p).at(p)
     }
 
     /// Registers a path that something else created during this transaction.
     pub fn track_new(&mut self, p: &Path) {
-        self.log.push(Undo::RemoveNew(p.to_path_buf()));
+        if let Err(e) = self.note(Undo::RemoveNew(p.to_path_buf())) {
+            tracing::error!("cannot journal {}: {e}", p.display());
+        }
     }
 
     /// Atomically writes `bytes` to `p` with permission bits `mode`.
     pub fn write(&mut self, p: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         let tmp = sibling(p, "tmp");
+        self.note(Undo::RemoveNew(tmp.clone()))?;
         let written = (|| {
             let mut f = fs::OpenOptions::new()
                 .write(true)
@@ -135,35 +163,28 @@ impl Txn {
             let _ = fs::remove_file(&tmp);
             return Err(e).at(&tmp);
         }
-        let backup = match fs::symlink_metadata(p) {
+        match fs::symlink_metadata(p) {
             Ok(m) if m.file_type().is_dir() => {
                 let _ = fs::remove_file(&tmp);
                 return Err(std::io::Error::from(std::io::ErrorKind::IsADirectory)).at(p);
             }
             Ok(_) => {
                 let bak = sibling(p, "bak");
+                self.note(Undo::Restore {
+                    orig: p.to_path_buf(),
+                    backup: bak.clone(),
+                })?;
                 if let Err(e) = fs::hard_link(p, &bak) {
                     let _ = fs::remove_file(&tmp);
                     return Err(e).at(p);
                 }
-                Some(bak)
             }
-            Err(_) => None,
-        };
+            Err(_) => self.note(Undo::RemoveNew(p.to_path_buf()))?,
+        }
         if let Err(e) = fs::rename(&tmp, p) {
             let _ = fs::remove_file(&tmp);
-            if let Some(bak) = &backup {
-                let _ = fs::remove_file(bak);
-            }
             return Err(e).at(p);
         }
-        self.log.push(match backup {
-            Some(backup) => Undo::Restore {
-                orig: p.to_path_buf(),
-                backup,
-            },
-            None => Undo::RemoveNew(p.to_path_buf()),
-        });
         Ok(())
     }
 
@@ -182,12 +203,11 @@ impl Txn {
 
     fn move_aside(&mut self, p: &Path, kind: &str) -> Result<()> {
         let dest = sibling(p, kind);
-        fs::rename(p, &dest).at(p)?;
-        self.log.push(Undo::Restore {
+        self.note(Undo::Restore {
             orig: p.to_path_buf(),
-            backup: dest,
-        });
-        Ok(())
+            backup: dest.clone(),
+        })?;
+        fs::rename(p, &dest).at(p)
     }
 
     /// Renames `from` to `to`; `to` must not exist.
@@ -195,12 +215,11 @@ impl Txn {
         if exists_nofollow(to) {
             return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)).at(to);
         }
-        fs::rename(from, to).at(from)?;
-        self.log.push(Undo::Rename {
+        self.note(Undo::Rename {
             from: from.to_path_buf(),
             to: to.to_path_buf(),
-        });
-        Ok(())
+        })?;
+        fs::rename(from, to).at(from)
     }
 
     /// Atomically points `link` at `target`, replacing an existing symlink.
@@ -212,15 +231,16 @@ impl Txn {
             }
             Err(_) => None,
         };
-        replace_symlink(target, link)?;
-        self.log.push(match old {
+        let tmp = sibling(link, "tmp");
+        self.note(match old {
             Some(target) => Undo::RestoreLink {
                 link: link.to_path_buf(),
                 target,
             },
             None => Undo::RemoveNew(link.to_path_buf()),
-        });
-        Ok(())
+        })?;
+        self.note(Undo::RemoveNew(tmp.clone()))?;
+        replace_symlink(target, link, &tmp)
     }
 
     /// Whether `p` is a backup, trash or temp path this transaction created and still tracks.
@@ -231,25 +251,70 @@ impl Txn {
         })
     }
 
-    /// Keeps all changes and discards backups.
+    /// Keeps all changes and discards backups. The journal goes away only if
+    /// every backup was purged; otherwise it stays so recovery can finish.
     pub fn commit(mut self) {
         self.committed = true;
-        for entry in std::mem::take(&mut self.log) {
-            if let Undo::Restore { backup, .. } = entry
-                && let Err(e) = remove_any(&backup)
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::error!("cannot purge {}: {e}", backup.display());
-            }
+        let steps = std::mem::take(&mut self.log);
+        if purge(&steps)
+            && let Some(j) = self.journal.take()
+        {
+            remove_journal(j.path());
         }
     }
 }
 
-fn replace_symlink(target: &Path, link: &Path) -> Result<()> {
-    let tmp = sibling(link, "tmp");
-    symlink(target, &tmp).at(&tmp)?;
-    if let Err(e) = fs::rename(&tmp, link) {
-        let _ = fs::remove_file(&tmp);
+/// Deletes the backups and trash a committed transaction no longer needs.
+/// Returns whether every one of them is gone.
+pub(crate) fn purge(steps: &[Undo]) -> bool {
+    let mut all_ok = true;
+    for entry in steps {
+        if let Undo::Restore { backup, .. } = entry
+            && let Err(e) = remove_any(backup)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!("cannot purge {}: {e}", backup.display());
+            all_ok = false;
+        }
+    }
+    all_ok
+}
+
+fn remove_journal(path: &Path) {
+    if let Err(e) = fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::error!("cannot remove journal {}: {e}", path.display());
+    }
+}
+
+/// Undoes one step. A step whose effect is not there (it may never have run
+/// before a crash) counts as undone.
+pub(crate) fn undo_step(step: &Undo) -> std::io::Result<()> {
+    let result = match step {
+        Undo::RemoveDir(p) => fs::remove_dir(p),
+        Undo::RemoveNew(p) => remove_any(p),
+        Undo::Restore { orig, backup } => fs::rename(backup, orig),
+        Undo::Rename { from, to } => {
+            if exists_nofollow(to) {
+                fs::rename(to, from)
+            } else {
+                Ok(())
+            }
+        }
+        Undo::RestoreLink { link, target } => replace_symlink(target, link, &sibling(link, "tmp"))
+            .map_err(|e| std::io::Error::other(e.to_string())),
+    };
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+fn replace_symlink(target: &Path, link: &Path, tmp: &Path) -> Result<()> {
+    symlink(target, tmp).at(tmp)?;
+    if let Err(e) = fs::rename(tmp, link) {
+        let _ = fs::remove_file(tmp);
         return Err(e).at(link);
     }
     Ok(())
@@ -260,19 +325,41 @@ impl Drop for Txn {
         if self.committed {
             return;
         }
+        let mut all_ok = true;
         while let Some(entry) = self.log.pop() {
-            let result: std::io::Result<()> = match &entry {
-                Undo::RemoveDir(p) => fs::remove_dir(p),
-                Undo::RemoveNew(p) => remove_any(p),
-                Undo::Restore { orig, backup } => fs::rename(backup, orig),
-                Undo::Rename { from, to } => fs::rename(to, from),
-                Undo::RestoreLink { link, target } => {
-                    replace_symlink(target, link).map_err(|e| std::io::Error::other(e.to_string()))
-                }
-            };
-            if let Err(e) = result {
+            if let Err(e) = undo_step(&entry) {
                 tracing::error!("rollback step failed: {e}");
+                all_ok = false;
             }
         }
+        if all_ok && let Some(j) = self.journal.take() {
+            remove_journal(j.path());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn undo_tolerates_steps_that_never_ran() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let orig = tmp.path().join("orig");
+        fs::write(&orig, b"x").unwrap();
+        undo_step(&Undo::RemoveNew(missing.clone())).unwrap();
+        undo_step(&Undo::RemoveDir(missing.clone())).unwrap();
+        undo_step(&Undo::Restore {
+            orig: orig.clone(),
+            backup: missing.clone(),
+        })
+        .unwrap();
+        undo_step(&Undo::Rename {
+            from: orig.clone(),
+            to: missing,
+        })
+        .unwrap();
+        assert_eq!(fs::read(&orig).unwrap(), b"x");
     }
 }

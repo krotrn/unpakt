@@ -5,6 +5,8 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use unpakt_core::Txn;
+use unpakt_core::cancel::Cancel;
+use unpakt_core::journal::{Expect, Intent};
 
 fn seed(root: &Path) {
     fs::create_dir_all(root.join("a")).unwrap();
@@ -186,4 +188,74 @@ fn remove_file_refuses_directories() {
     txn.commit();
     assert!(fs::symlink_metadata(&link).is_err());
     assert!(dir.join("sub/f").is_file());
+}
+
+fn intent() -> Intent {
+    Intent {
+        app: "demo".into(),
+        expect: Expect::Absent,
+    }
+}
+
+#[test]
+fn journaled_txn_records_before_acting_and_cleans_up() {
+    let root = tempfile::tempdir().unwrap();
+    let jdir = root.path().join("journal");
+    let a = root.path().join("a");
+    let d = root.path().join("d");
+    fs::write(&a, b"old").unwrap();
+    let mut txn = Txn::journaled(Cancel::new(), &jdir, intent()).unwrap();
+    txn.write(&a, b"new", 0o644).unwrap();
+    txn.create_dir_new(&d).unwrap();
+    let files: Vec<_> = fs::read_dir(&jdir).unwrap().flatten().collect();
+    assert_eq!(files.len(), 1);
+    let text = fs::read_to_string(files[0].path()).unwrap();
+    assert!(text.contains("Restore") && text.contains("RemoveNew"));
+    txn.commit();
+    assert_eq!(fs::read_dir(&jdir).unwrap().count(), 0);
+    no_leftovers(root.path());
+    assert_eq!(fs::read(&a).unwrap(), b"new");
+    assert!(d.is_dir());
+}
+
+#[test]
+fn dropped_journaled_txn_rolls_back_and_removes_journal() {
+    let root = tempfile::tempdir().unwrap();
+    let jdir = root.path().join("journal");
+    let a = root.path().join("a");
+    let d = root.path().join("d");
+    fs::write(&a, b"old").unwrap();
+    {
+        let mut txn = Txn::journaled(Cancel::new(), &jdir, intent()).unwrap();
+        txn.write(&a, b"new", 0o644).unwrap();
+        txn.create_dir_new(&d).unwrap();
+    }
+    assert_eq!(fs::read(&a).unwrap(), b"old");
+    assert!(!d.exists());
+    assert_eq!(fs::read_dir(&jdir).unwrap().count(), 0);
+    no_leftovers(root.path());
+}
+
+#[test]
+fn failed_purge_after_commit_keeps_new_files_and_the_journal() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let jdir = root.path().join("journal");
+    let dir = root.path().join("data");
+    fs::create_dir_all(&dir).unwrap();
+    let a = dir.join("a");
+    fs::write(&a, b"old").unwrap();
+    let mut txn = Txn::journaled(Cancel::new(), &jdir, intent()).unwrap();
+    txn.write(&a, b"new", 0o644).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    txn.commit();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(fs::read(&a).unwrap(), b"new");
+    let backups = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".unpakt-"))
+        .count();
+    assert_eq!(backups, 1);
+    assert_eq!(fs::read_dir(&jdir).unwrap().count(), 1);
 }

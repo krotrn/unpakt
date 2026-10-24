@@ -374,7 +374,7 @@ main() {
     else
         say "✔" "unpakt installed."
     fi
-    say "→" "Install an app with: unpakt add <file, URL or owner/repo>"
+    say "→" "Install an app with: unpakt add <file, URL or GitHub repo URL>"
 }
 
 main "$@"

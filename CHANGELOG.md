@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `unpakt self uninstall` and `self update` on Arch no longer stop at
+  pacman's own question after you have already confirmed (or passed `--yes`).
+- The installers' closing hint no longer suggests `unpakt add owner/repo`,
+  which isn't supported; use the repository's GitHub URL.
+
 ## [0.1.1] - 2026-10-24
 
 ### Added

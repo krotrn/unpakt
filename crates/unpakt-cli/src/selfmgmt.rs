@@ -573,7 +573,7 @@ fn update(check: bool, yes: bool) -> Result<()> {
                      (Arch does not support partial upgrades). Continue?",
                 )?;
             }
-            run_inherited(privileged("pacman").args(["-Syu", "unpakt"]))?;
+            run_inherited(privileged("pacman").args(["-Syu", "--noconfirm", "unpakt"]))?;
         }
         Route::Deb => {
             let deb = format!("unpakt_{version}-1_amd64.deb");
@@ -695,7 +695,7 @@ fn uninstall(purge: bool, yes: bool) -> Result<()> {
 fn remove_install(host: &Host, route: Route) -> Result<()> {
     match route {
         Route::Pacman => {
-            run_inherited(privileged("pacman").args(["-Rns", "unpakt"]))?;
+            run_inherited(privileged("pacman").args(["-Rns", "--noconfirm", "unpakt"]))?;
             drop_pacman_repo()?;
         }
         Route::Deb => run_inherited(privileged("apt-get").args(["purge", "-y", "unpakt"]))?,

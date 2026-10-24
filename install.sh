@@ -94,7 +94,7 @@ install_unpakt() {
         *":$BIN:"*) ;;
         *) say "!" "$BIN isn't on your PATH yet." ;;
     esac
-    say "→" "Install an app with: unpakt add <file, URL or owner/repo>"
+    say "→" "Install an app with: unpakt add <file, URL or GitHub repo URL>"
 }
 
 gui=1

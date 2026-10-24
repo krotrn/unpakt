@@ -15,6 +15,11 @@ pub enum Error {
     NotFound(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error(
+        "conflict: `{command}` would be shadowed by {}; use --force or choose another command",
+        by.display()
+    )]
+    Shadowed { command: String, by: PathBuf },
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("http error: {0}")]

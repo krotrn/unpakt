@@ -569,7 +569,7 @@ fn forced_shadowed_command_survives_update_and_rollback() {
 
     publish(&forge, src.path(), "1.0.0");
     let plain = engine.inspect(REPO, AddOpts::default()).unwrap();
-    assert!(matches!(engine.install(plain), Err(Error::Conflict(_))));
+    assert!(matches!(engine.install(plain), Err(Error::Shadowed { .. })));
     let forced = AddOpts {
         force: true,
         ..AddOpts::default()

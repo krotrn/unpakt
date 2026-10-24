@@ -574,3 +574,55 @@ fn desktop_actions_run_the_installed_program() {
         Err(_) => eprintln!("desktop-file-validate not installed; skipping validation"),
     }
 }
+
+fn desktop_text_for(id: &str, name: &str, src: Option<&str>) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = Layout::under(dir.path());
+    for d in [&layout.applications, &layout.bin, &layout.icons] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let exec = layout.apps.join(format!("{id}/current/app"));
+    let pv = OsString::from(&layout.bin);
+    let mut r = req(&exec, &pv);
+    r.id = id;
+    r.name = name;
+    r.desktop_src = src;
+    r.command = None;
+    let mut txn = Txn::new();
+    integrate(&layout, &r, &mut txn).unwrap();
+    txn.commit();
+    let desktop = layout.applications.join(format!("unpakt-{id}.desktop"));
+    let text = fs::read_to_string(&desktop).unwrap();
+    match std::process::Command::new("desktop-file-validate")
+        .arg(&desktop)
+        .status()
+    {
+        Ok(s) => assert!(s.success(), "desktop-file-validate failed on:\n{text}"),
+        Err(_) => eprintln!("desktop-file-validate not installed; skipping validation"),
+    }
+    text
+}
+
+#[test]
+fn non_default_id_is_shown_in_the_launcher_name() {
+    let text = desktop_text_for("neovim-tar", "Neovim", None);
+    assert!(text.contains("Name=Neovim (neovim-tar)\n"), "{text}");
+}
+
+#[test]
+fn default_id_keeps_the_plain_launcher_name() {
+    let text = desktop_text_for("neovim", "Neovim", None);
+    assert!(text.contains("Name=Neovim\n"), "{text}");
+    let text = desktop_text_for("my-app", "My App!", None);
+    assert!(text.contains("Name=My App!\n"), "{text}");
+}
+
+#[test]
+fn id_suffix_reaches_bundled_and_localized_names_on_one_line() {
+    let src =
+        "[Desktop Entry]\nName=Orig\\nTwo\nName[de]=Ursprung\nComment=Name stays\nExec=orig\n";
+    let text = desktop_text_for("orig-alt", "Orig", Some(src));
+    assert!(text.contains("Name=Orig\\nTwo (orig-alt)\n"), "{text}");
+    assert!(text.contains("Name[de]=Ursprung (orig-alt)\n"), "{text}");
+    assert!(text.contains("Comment=Name stays\n"), "{text}");
+}

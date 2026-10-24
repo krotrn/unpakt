@@ -182,6 +182,27 @@ impl DesktopEntry {
         }
     }
 
+    /// Appends ` (suffix)` to `Name` and every localized `Name[xx]` of the main
+    /// group, so entries for the same program can be told apart. Values stay on
+    /// one line and `suffix` is escaped like any other string.
+    pub fn tag_names(&mut self, suffix: &str) {
+        let tag = format!(" ({})", escape_string(suffix));
+        let tagged: Vec<(String, String)> = self
+            .main_group()
+            .lines
+            .iter()
+            .filter_map(|l| match l {
+                Line::Pair { key, value, .. } if key == "Name" || key.starts_with("Name[") => {
+                    Some((key.clone(), format!("{}{tag}", value.trim_end())))
+                }
+                _ => None,
+            })
+            .collect();
+        for (key, value) in tagged {
+            self.set(&key, &value);
+        }
+    }
+
     /// Removes every `key` line from the main group.
     pub fn remove(&mut self, key: &str) {
         self.main_group_mut()

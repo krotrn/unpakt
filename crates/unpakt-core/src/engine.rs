@@ -672,7 +672,7 @@ impl Engine {
     /// it. Returns the new label, or `None` when already up to date. Any
     /// failure leaves the current version exactly as it was.
     pub fn update(&mut self, id: &str) -> Result<Option<String>> {
-        let (app, versions, files) = self.get(id)?;
+        let (app, versions, _) = self.get(id)?;
         if app.source.kind == SourceKind::LocalFile {
             return Err(Error::Unsupported(format!(
                 "{id} was installed from a local file and has no update source"

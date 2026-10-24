@@ -5,10 +5,12 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::backend::{Plan, for_payload};
 use crate::cancel::Cancel;
@@ -23,12 +25,16 @@ use crate::model::{
     Artifact, EntryCandidate, FormatKind, Icon, Payload, Release, SourceCfg, SourceKind,
 };
 use crate::naming::{slug, validate_command, version_label};
+use crate::progress::{Progress, ProgressFn};
 use crate::select::choose;
 use crate::source::{for_kind, resolve};
 use crate::version::is_newer;
 use crate::{Layout, Txn};
 
 const UPDATE_DESKTOP_DATABASE: &str = "update-desktop-database";
+
+/// Shortest gap between two download progress events.
+const DOWNLOAD_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How many versions of one app stay on disk.
 pub const KEEP_VERSIONS: usize = 3;
@@ -104,6 +110,7 @@ pub struct Engine {
     path_var: OsString,
     http: Http,
     cancel: Cancel,
+    progress: ProgressFn,
 }
 
 fn now() -> i64 {
@@ -232,6 +239,7 @@ impl Engine {
             path_var: std::env::var_os("PATH").unwrap_or_default(),
             http: Http::from_env()?,
             cancel: Cancel::new(),
+            progress: Arc::new(|_| {}),
         })
     }
 
@@ -244,6 +252,21 @@ impl Engine {
     pub fn with_cancel(mut self, cancel: Cancel) -> Engine {
         self.cancel = cancel;
         self
+    }
+
+    /// Replaces the cancel flag used by the operations that follow.
+    pub fn set_cancel(&mut self, cancel: Cancel) {
+        self.cancel = cancel;
+    }
+
+    /// Reports the stages of each operation to `f`.
+    pub fn with_progress(mut self, f: ProgressFn) -> Engine {
+        self.progress = f;
+        self
+    }
+
+    fn emit(&self, event: Progress) {
+        (self.progress)(event);
     }
 
     pub fn with_http(mut self, http: Http) -> Engine {
@@ -330,10 +353,35 @@ impl Engine {
             .at(&root)?
             .keep();
         let guard = DownloadGuard(Some(dir.clone()));
+        let file = Url::parse(url)
+            .ok()
+            .and_then(|u| {
+                u.path_segments()
+                    .and_then(|mut s| s.next_back().map(String::from))
+            })
+            .unwrap_or_default();
+        // At most one event per interval, plus the last chunk's.
+        let mut last_emit: Option<Instant> = None;
+        let mut pending: Option<(u64, Option<u64>)> = None;
         let path = self
             .http
-            .download_cancellable(url, &dir, &self.cancel)?
+            .download_with(url, &dir, &self.cancel, &mut |done, total| {
+                if last_emit.is_none_or(|t| t.elapsed() >= DOWNLOAD_EVENT_INTERVAL) {
+                    last_emit = Some(Instant::now());
+                    pending = None;
+                    self.emit(Progress::Downloading {
+                        file: file.clone(),
+                        done,
+                        total,
+                    });
+                } else {
+                    pending = Some((done, total));
+                }
+            })?
             .path;
+        if let Some((done, total)) = pending {
+            self.emit(Progress::Downloading { file, done, total });
+        }
         guard.keep();
         Ok(path)
     }
@@ -349,6 +397,9 @@ impl Engine {
             .map(Regex::new)
             .transpose()
             .map_err(|e| Error::Parse(format!("invalid --pattern: {e}")))?;
+        if source.kind != SourceKind::LocalFile {
+            self.emit(Progress::Fetching);
+        }
         let release = plugin.latest(&source, &self.http)?;
         let asset = choose(&release.assets, &self.host, pattern.as_ref())?;
         let canonical = match source.kind {
@@ -364,6 +415,7 @@ impl Engine {
             path: canonical.clone(),
             file_name,
         };
+        self.emit(Progress::Inspecting);
         let payload = detect(&artifact)?.inspect(&artifact)?;
         let backend = for_payload(&payload).ok_or_else(|| {
             Error::Unsupported(format!(
@@ -474,6 +526,7 @@ impl Engine {
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
+        self.emit(Progress::Installing);
         let mut txn = Txn::with_cancel(self.cancel.clone());
         self.clear_stale(&id, &[], &mut txn)?;
         let installed = backend.install(&p.plan, &self.layout, &mut txn)?;
@@ -651,6 +704,7 @@ impl Engine {
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;
 
+        self.emit(Progress::Installing);
         let mut txn = Txn::with_cancel(self.cancel.clone());
         let known: Vec<&str> = versions.iter().map(|v| v.label.as_str()).collect();
         self.clear_stale(id, &known, &mut txn)?;
@@ -757,6 +811,7 @@ impl Engine {
             )));
         }
 
+        self.emit(Progress::Installing);
         let desktop_src = files
             .iter()
             .find(|f| f.kind == FileKind::Desktop)
@@ -817,6 +872,7 @@ impl Engine {
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
         let (_, _, files) = self.get(id)?;
+        self.emit(Progress::Installing);
         let mut txn = Txn::with_cancel(self.cancel.clone());
         disintegrate(&files, &mut txn)?;
         let dir = self.layout.apps.join(id);

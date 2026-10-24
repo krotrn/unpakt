@@ -4,10 +4,14 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::{Comp, E, build_appimage, build_tarball, tree_snapshot};
+use std::sync::{Arc, Mutex};
+
+use common::{Comp, E, MockForge, build_appimage, build_tarball, tree_snapshot};
 use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine};
 use unpakt_core::host::Host;
+use unpakt_core::http::Http;
+use unpakt_core::progress::{Progress, ProgressFn};
 use unpakt_core::{Error, Layout};
 
 const ELF: &[u8] = b"\x7fELF-fixture";
@@ -547,4 +551,92 @@ fn remove_with_cancel_set_is_undone() {
     assert!(matches!(engine.remove(&id), Err(Error::Interrupted)));
     assert_eq!(tree_snapshot(root.path()), installed);
     assert!(engine.get(&id).is_ok(), "the app is still recorded");
+}
+
+fn recorder() -> (ProgressFn, Arc<Mutex<Vec<Progress>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let f: ProgressFn = Arc::new(move |p| sink.lock().unwrap().push(p));
+    (f, events)
+}
+
+#[test]
+fn inspect_reports_progress_in_order() {
+    let forge = MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = tool_tarball(src.path());
+    let bytes = std::fs::read(&tarball).unwrap();
+    let n_bytes = bytes.len() as u64;
+    forge.publish(
+        "1.0.0",
+        vec![("unpakt-fixture-tool-1.0.tar.gz".into(), bytes)],
+    );
+    let (recorder, events) = recorder();
+    let engine = engine(root.path())
+        .with_http(Http::new(&forge.api_url(), None).unwrap())
+        .with_progress(recorder);
+
+    engine
+        .inspect("https://github.com/o/r", AddOpts::default())
+        .unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.first(), Some(&Progress::Fetching));
+    let downloads: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Progress::Downloading { done, total, .. } => Some((*done, *total)),
+            _ => None,
+        })
+        .collect();
+    assert!(!downloads.is_empty());
+    assert!(downloads.windows(2).all(|w| w[0].0 <= w[1].0));
+    assert_eq!(downloads.last().unwrap().0, n_bytes);
+    assert_eq!(events.last(), Some(&Progress::Inspecting));
+}
+
+#[test]
+fn install_reports_installing() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = tool_tarball(src.path());
+    let (recorder, events) = recorder();
+    let mut engine = engine(root.path()).with_progress(recorder);
+
+    let plan = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    engine.install(plan).unwrap();
+
+    let events = events.lock().unwrap();
+    let installing = events
+        .iter()
+        .filter(|e| **e == Progress::Installing)
+        .count();
+    assert_eq!(installing, 1);
+    assert!(!events.contains(&Progress::Fetching));
+}
+
+#[test]
+fn set_cancel_replaces_a_tripped_flag() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = tool_tarball(src.path());
+    let tripped = Cancel::new();
+    let mut engine = engine(root.path()).with_cancel(tripped.clone());
+    tripped.cancel();
+    engine.set_cancel(Cancel::new());
+
+    let plan = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    engine.install(plan).unwrap();
+    assert_eq!(engine.list().unwrap().len(), 1);
+}
+
+#[test]
+fn engine_is_send() {
+    fn send<T: Send>() {}
+    send::<Engine>();
 }

@@ -146,6 +146,18 @@ impl Http {
         dest_dir: &Path,
         cancel: &Cancel,
     ) -> Result<Download> {
+        self.download_with(url, dest_dir, cancel, &mut |_, _| {})
+    }
+
+    /// Like [`Http::download_cancellable`], calling `on_bytes(done, content_length)`
+    /// after every chunk read.
+    pub fn download_with(
+        &self,
+        url: &str,
+        dest_dir: &Path,
+        cancel: &Cancel,
+        on_bytes: &mut dyn FnMut(u64, Option<u64>),
+    ) -> Result<Download> {
         cancel.check()?;
         let parsed = Url::parse(url).map_err(|e| http_err(url, e))?;
         let name = file_name_of(&parsed)?;
@@ -180,6 +192,7 @@ impl Http {
             hasher.update(&buf[..n]);
             part.write_all(&buf[..n]).at(part.path())?;
             total += n as u64;
+            on_bytes(total, expected);
         }
         if let Some(expected) = expected
             && expected != total
@@ -215,6 +228,45 @@ mod tests {
         assert!(value.is_sensitive());
         assert_eq!(value.as_bytes(), b"Bearer tok");
         assert!(bearer("bad\nvalue").is_err());
+    }
+
+    #[test]
+    fn download_with_reports_bytes() {
+        use std::io::{Read, Write};
+
+        let body = vec![7u8; 300_000];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req = [0u8; 4096];
+            let _ = stream.read(&mut req);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&served).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let http = Http::new("http://127.0.0.1:1", None).unwrap();
+        let mut seen = Vec::new();
+        let download = http
+            .download_with(
+                &format!("http://127.0.0.1:{port}/blob.bin"),
+                dir.path(),
+                &Cancel::new(),
+                &mut |done, total| seen.push((done, total)),
+            )
+            .unwrap();
+        server.join().unwrap();
+
+        let len = body.len() as u64;
+        assert_eq!(std::fs::read(download.path).unwrap(), body);
+        assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert_eq!(seen.last(), Some(&(len, Some(len))));
     }
 
     #[test]

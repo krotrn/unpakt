@@ -1,4 +1,5 @@
 pub mod app;
+pub mod apps;
 pub mod review;
 pub mod state;
 pub mod worker;

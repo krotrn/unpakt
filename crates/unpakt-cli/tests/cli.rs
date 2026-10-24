@@ -188,3 +188,85 @@ fn add_accepts_a_pattern_and_validates_it() {
     assert_eq!(good.status.code(), Some(0), "{}", stderr(&good));
     assert!(!stdout(&run(tmp.path(), &["list"])).is_empty());
 }
+
+/// Spawns `add` on a pseudo-terminal so the confirmation prompt is shown, and
+/// returns the child plus the pty master, which the caller keeps alive.
+fn spawn_at_prompt(root: &Path, input: &Path) -> (std::process::Child, std::fs::File) {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: both out-pointers are valid; the null pointers request defaults.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty failed");
+    // SAFETY: openpty returned two fresh descriptors that nothing else owns.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let child = Command::new(env!("CARGO_BIN_EXE_unpakt"))
+        .env_clear()
+        .env("UNPAKT_ROOT", root)
+        .env("HOME", root)
+        .env(
+            "PATH",
+            format!("{}/.local/bin:/usr/bin:/bin", root.display()),
+        )
+        .args(["add", input.to_str().unwrap()])
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    (child, std::fs::File::from(master))
+}
+
+#[test]
+fn single_interrupt_at_the_prompt_exits_130_and_installs_nothing() {
+    use std::io::Read;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let (mut child, _master) = spawn_at_prompt(tmp.path(), &tarball);
+
+    let mut err = child.stderr.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        while let Ok(n) = err.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !seen.contains("[y/N]") {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let chunk = rx.recv_timeout(left).expect("prompt never appeared");
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+
+    // SAFETY: plain signal delivery to our own child.
+    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            panic!("still running 5s after a single interrupt");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(130));
+    let list = run(tmp.path(), &["list"]);
+    assert_eq!(stdout(&list), "");
+}

@@ -354,3 +354,36 @@ fn corrupt_data_block_degrades() {
     assert_eq!(p.warnings.len(), 1);
     assert!(p.warnings[0].starts_with("could not read AppImage contents"));
 }
+
+#[test]
+fn oversized_tarball_icon_is_dropped_with_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let huge = vec![7u8; 9 * 1024 * 1024];
+    let path = build_tarball(
+        tmp.path(),
+        "nvim-1.0.tar.gz",
+        Comp::Gz,
+        &[
+            E::File("nvim-linux-x86_64/bin/nvim", ELF, 0o755),
+            E::File(
+                "nvim-linux-x86_64/share/applications/nvim.desktop",
+                b"[Desktop Entry]\nType=Application\nName=Neovim\nIcon=nvim\nExec=nvim\n",
+                0o644,
+            ),
+            E::File(
+                "nvim-linux-x86_64/share/icons/hicolor/128x128/apps/nvim.png",
+                &huge,
+                0o644,
+            ),
+        ],
+    );
+    let p = inspect(&path).unwrap();
+    assert!(p.icon.is_none());
+    assert!(
+        p.warnings
+            .iter()
+            .any(|w| w.contains("icon") && w.contains("too large")),
+        "{:?}",
+        p.warnings
+    );
+}

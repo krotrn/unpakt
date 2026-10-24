@@ -7,7 +7,7 @@ use crate::error::{Error, IoResultExt, Result};
 use crate::txn::Undo;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,6 +32,9 @@ pub struct Intent {
 pub(crate) struct Journal {
     file: File,
     path: PathBuf,
+    /// Length of the file, and where the most recent record starts.
+    len: u64,
+    last_start: u64,
 }
 
 impl Journal {
@@ -45,15 +48,35 @@ impl Journal {
             .create_new(true)
             .open(&path)
             .at(&path)?;
-        file.write_all(line(intent)?.as_bytes()).at(&path)?;
+        let header = line(intent)?;
+        file.write_all(header.as_bytes()).at(&path)?;
         file.sync_all().at(&path)?;
         File::open(dir).and_then(|d| d.sync_all()).at(dir)?;
-        Ok(Journal { file, path })
+        let len = header.len() as u64;
+        Ok(Journal {
+            file,
+            path,
+            len,
+            last_start: len,
+        })
     }
 
     /// Appends one step and syncs it to disk.
     pub(crate) fn record(&mut self, step: &Undo) -> Result<()> {
-        self.file.write_all(line(step)?.as_bytes()).at(&self.path)?;
+        let text = line(step)?;
+        self.file.write_all(text.as_bytes()).at(&self.path)?;
+        self.last_start = self.len;
+        self.len += text.len() as u64;
+        self.file.sync_data().at(&self.path)
+    }
+
+    /// Cuts the most recent record off again, for a step that did not happen.
+    pub(crate) fn retract_last(&mut self) -> Result<()> {
+        self.file.set_len(self.last_start).at(&self.path)?;
+        self.file
+            .seek(SeekFrom::Start(self.last_start))
+            .at(&self.path)?;
+        self.len = self.last_start;
         self.file.sync_data().at(&self.path)
     }
 

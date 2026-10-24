@@ -1,11 +1,11 @@
 use crate::cancel::Cancel;
-use crate::error::{IoResultExt, Result};
+use crate::error::{Error, IoResultExt, Result};
 use crate::journal::{Intent, Journal};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -118,11 +118,11 @@ impl Txn {
             cur = c.parent();
         }
         for dir in missing.into_iter().rev() {
-            self.note(Undo::RemoveDir(dir.clone()))?;
-            match fs::create_dir(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e).at(&dir),
+            match self.mkdir(&dir, Undo::RemoveDir(dir.clone())) {
+                Ok(_) => {}
+                Err(Error::Io { source, .. })
+                    if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -134,8 +134,22 @@ impl Txn {
         if exists_nofollow(p) {
             return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)).at(p);
         }
-        self.note(Undo::RemoveNew(p.to_path_buf()))?;
-        fs::create_dir(p).at(p)
+        self.mkdir(p, Undo::RemoveNew(p.to_path_buf()))
+    }
+
+    /// Records `step`, then creates `dir`. If the directory is not created
+    /// (for instance because something else made it first) the step is taken
+    /// back out of the log and the journal, so undo never touches it.
+    fn mkdir(&mut self, dir: &Path, step: Undo) -> Result<()> {
+        self.note(step)?;
+        if let Err(e) = fs::create_dir(dir) {
+            self.log.pop();
+            if let Some(j) = &mut self.journal {
+                j.retract_last()?;
+            }
+            return Err(e).at(dir);
+        }
+        Ok(())
     }
 
     /// Registers a path that something else created during this transaction.
@@ -294,7 +308,16 @@ pub(crate) fn undo_step(step: &Undo) -> std::io::Result<()> {
     let result = match step {
         Undo::RemoveDir(p) => fs::remove_dir(p),
         Undo::RemoveNew(p) => remove_any(p),
-        Undo::Restore { orig, backup } => fs::rename(backup, orig),
+        Undo::Restore { orig, backup } => {
+            match (fs::symlink_metadata(backup), fs::symlink_metadata(orig)) {
+                // A backup hard-linked to `orig` whose replacing rename never ran:
+                // renaming would be a no-op, so just drop the extra link.
+                (Ok(b), Ok(o)) if b.dev() == o.dev() && b.ino() == o.ino() => {
+                    fs::remove_file(backup)
+                }
+                _ => fs::rename(backup, orig),
+            }
+        }
         Undo::Rename { from, to } => {
             if exists_nofollow(to) {
                 fs::rename(to, from)
@@ -341,6 +364,42 @@ impl Drop for Txn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_restore_drops_backup_linked_to_orig() {
+        let tmp = tempfile::tempdir().unwrap();
+        let orig = tmp.path().join("orig");
+        let bak = tmp.path().join(".unpakt-bak-1-0-orig");
+        fs::write(&orig, b"x").unwrap();
+        fs::hard_link(&orig, &bak).unwrap();
+        undo_step(&Undo::Restore {
+            orig: orig.clone(),
+            backup: bak.clone(),
+        })
+        .unwrap();
+        assert!(!bak.exists());
+        assert_eq!(fs::read(&orig).unwrap(), b"x");
+    }
+
+    #[test]
+    fn mkdir_that_loses_a_race_is_not_undone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jdir = tmp.path().join("journal");
+        let d = tmp.path().join("d");
+        fs::create_dir(&d).unwrap();
+        fs::write(d.join("keep"), b"k").unwrap();
+        let intent = Intent {
+            app: "demo".into(),
+            expect: crate::journal::Expect::Absent,
+        };
+        let mut txn = Txn::journaled(Cancel::new(), &jdir, intent).unwrap();
+        txn.mkdir(&d, Undo::RemoveNew(d.clone())).unwrap_err();
+        let jpath = fs::read_dir(&jdir).unwrap().next().unwrap().unwrap().path();
+        let (_, steps) = crate::journal::read(&jpath).unwrap();
+        assert!(steps.is_empty());
+        drop(txn);
+        assert_eq!(fs::read(d.join("keep")).unwrap(), b"k");
+    }
 
     #[test]
     fn undo_tolerates_steps_that_never_ran() {

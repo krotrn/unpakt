@@ -35,7 +35,8 @@ fn classify(input: &str) -> Shape {
     let Ok(url) = ::url::Url::parse(input) else {
         return Shape::NotGithub;
     };
-    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+    let github_host = matches!(url.host_str(), Some("github.com" | "www.github.com"));
+    if !matches!(url.scheme(), "http" | "https") || !github_host {
         return Shape::NotGithub;
     }
     let segments: Vec<&str> = url.path_segments().map_or(Vec::new(), |s| s.collect());

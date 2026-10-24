@@ -50,6 +50,27 @@ fn resolve_routes_inputs() {
 }
 
 #[test]
+fn github_repo_urls_with_other_hosts_spellings_are_repos() {
+    for url in [
+        "https://www.github.com/o/r",
+        "http://github.com/o/r",
+        "http://www.github.com/o/r.git",
+    ] {
+        let (plugin, cfg) = resolve(url).unwrap();
+        assert_eq!(plugin.kind(), SourceKind::Github, "{url}");
+        assert_eq!(cfg.location, "https://github.com/o/r", "{url}");
+    }
+    for url in [
+        "https://www.github.com/o/r/tree/main",
+        "http://github.com/o/r/blob/main/x",
+    ] {
+        assert!(matches!(resolve(url), Err(Error::Refused(_))), "{url}");
+    }
+    let (plugin, _) = resolve("http://www.github.com/o/r/releases/download/v1/x.AppImage").unwrap();
+    assert_eq!(plugin.kind(), SourceKind::DirectUrl);
+}
+
+#[test]
 fn github_urls_with_paths_are_not_latest_release() {
     let (plugin, cfg) = resolve("https://github.com/o/r/releases/download/v1/x.AppImage").unwrap();
     assert_eq!(plugin.kind(), SourceKind::DirectUrl);

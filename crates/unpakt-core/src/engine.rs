@@ -196,11 +196,12 @@ fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) 
         .unwrap_or_else(|| id.to_string())
 }
 
-fn sha256_prefix(path: &Path) -> Result<String> {
+fn sha256_prefix(path: &Path, cancel: &Cancel) -> Result<String> {
     let mut file = std::fs::File::open(path).at(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
+        cancel.check()?;
         let n = file.read(&mut buf).at(path)?;
         if n == 0 {
             break;
@@ -516,7 +517,7 @@ impl Engine {
         };
         let label = match label_version {
             Some(v) => version_label(v),
-            None => sha256_prefix(&canonical)?,
+            None => sha256_prefix(&canonical, &self.cancel)?,
         };
 
         let entry = match &opts.entry {
@@ -554,6 +555,7 @@ impl Engine {
             label,
             entry,
         };
+        self.cancel.check()?;
         download.keep();
         Ok(InstallPlan {
             plan,
@@ -1117,5 +1119,37 @@ impl Engine {
             Ok(status) => tracing::warn!("{UPDATE_DESKTOP_DATABASE} exited with {status}"),
             Err(e) => tracing::warn!("could not run {UPDATE_DESKTOP_DATABASE}: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn big_file(dir: &Path) -> PathBuf {
+        let path = dir.join("big.bin");
+        std::fs::write(&path, vec![7u8; 200 * 1024]).unwrap();
+        path
+    }
+
+    #[test]
+    fn sha256_prefix_stops_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = big_file(dir.path());
+        let cancel = Cancel::new();
+        cancel.cancel();
+        assert!(matches!(
+            sha256_prefix(&path, &cancel),
+            Err(Error::Interrupted)
+        ));
+    }
+
+    #[test]
+    fn sha256_prefix_returns_twelve_hex_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = big_file(dir.path());
+        let prefix = sha256_prefix(&path, &Cancel::new()).unwrap();
+        assert_eq!(prefix.len(), 12);
+        assert!(prefix.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

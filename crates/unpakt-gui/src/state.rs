@@ -3,6 +3,7 @@ use std::path::Path;
 use percent_encoding::percent_decode_str;
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
+use unpakt_core::compat::Verdict;
 use unpakt_core::engine::{AddOpts, InstallPlan, UpdateInfo};
 use unpakt_core::manifest::AppRecord;
 use unpakt_core::progress::Progress;
@@ -48,7 +49,7 @@ fn version_text(label: &str, raw: Option<&str>) -> String {
 /// the view lists them separately.
 pub fn review_rows(p: &InstallPlan) -> Vec<(&'static str, String)> {
     let plan = &p.plan;
-    vec![
+    let mut rows = vec![
         ("Name", plan.name.clone()),
         (
             "Version",
@@ -69,7 +70,43 @@ pub fn review_rows(p: &InstallPlan) -> Vec<(&'static str, String)> {
             "Launcher entry",
             if p.want_desktop { "yes" } else { "no" }.into(),
         ),
-    ]
+    ];
+    if let Some(verdict) = &p.compat {
+        rows.push(("Compatibility", verdict.label().into()));
+    }
+    rows
+}
+
+/// The compatibility findings as `(blocking, detail)`; notes do not block.
+pub fn compat_findings(p: &InstallPlan) -> Vec<(bool, String)> {
+    p.compat
+        .as_ref()
+        .map(|v| {
+            v.findings()
+                .iter()
+                .map(|f| (!f.note, f.detail.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the review page offers for a plan.
+#[derive(Debug, PartialEq)]
+pub enum ReviewAction {
+    Install,
+    InstallAnyway,
+    Blocked(String),
+}
+
+pub fn review_action(p: &InstallPlan) -> ReviewAction {
+    match &p.compat {
+        Some(Verdict::Risky(_)) => ReviewAction::InstallAnyway,
+        Some(Verdict::NeedsContainer(_)) => ReviewAction::Blocked(
+            p.blocked()
+                .unwrap_or_else(|| "this package cannot be installed here".into()),
+        ),
+        _ => ReviewAction::Install,
+    }
 }
 
 /// One line of the installed-apps list.
@@ -518,6 +555,77 @@ mod tests {
         assert_eq!(rows[7], ("Launcher entry", "yes".to_string()));
         plan.command = None;
         assert_eq!(review_rows(&plan)[6].1, "none");
+    }
+
+    fn finding(detail: &str, note: bool) -> unpakt_core::compat::Finding {
+        unpakt_core::compat::Finding {
+            tag: "glibc",
+            detail: detail.into(),
+            note,
+        }
+    }
+
+    fn tarball_plan(tmp: &Path) -> InstallPlan {
+        let tarball = fixture_tarball(tmp);
+        let engine = Engine::new(
+            Layout::under(tmp),
+            Host {
+                fuse2: true,
+                ..Host::detect()
+            },
+        )
+        .unwrap();
+        engine
+            .inspect(tarball.to_str().unwrap(), AddOpts::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn review_rows_include_compatibility_for_packages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut plan = tarball_plan(tmp.path());
+        assert!(
+            review_rows(&plan)
+                .iter()
+                .all(|(n, _)| *n != "Compatibility")
+        );
+        plan.compat = Some(Verdict::Risky(vec![finding("needs glibc 2.99", false)]));
+        let rows = review_rows(&plan);
+        assert_eq!(
+            rows.last().unwrap(),
+            &("Compatibility", "risky".to_string())
+        );
+    }
+
+    #[test]
+    fn review_action_follows_verdict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut plan = tarball_plan(tmp.path());
+        assert_eq!(review_action(&plan), ReviewAction::Install);
+        plan.compat = Some(Verdict::Ok(vec![finding("a note", true)]));
+        assert_eq!(review_action(&plan), ReviewAction::Install);
+        plan.compat = Some(Verdict::Risky(vec![finding("odd", false)]));
+        assert_eq!(review_action(&plan), ReviewAction::InstallAnyway);
+        plan.compat = Some(Verdict::NeedsContainer(vec![finding("too new", false)]));
+        match review_action(&plan) {
+            ReviewAction::Blocked(m) => assert!(m.contains("nothing was installed")),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compat_findings_mark_notes_non_blocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut plan = tarball_plan(tmp.path());
+        assert!(compat_findings(&plan).is_empty());
+        plan.compat = Some(Verdict::Risky(vec![
+            finding("bad", false),
+            finding("fyi", true),
+        ]));
+        assert_eq!(
+            compat_findings(&plan),
+            vec![(true, "bad".to_string()), (false, "fyi".to_string())]
+        );
     }
 
     #[test]

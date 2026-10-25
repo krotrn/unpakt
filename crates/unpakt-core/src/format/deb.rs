@@ -2,7 +2,7 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use super::package::{Header, inspect_package};
-use super::stream::{DataSource, normalize};
+use super::stream::{DataSource, check_ar, normalize};
 use super::{Confidence, FormatPlugin, decompress, peek_head, read_head};
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Arch, Artifact, FormatKind, PackageFamily, Payload, Script};
@@ -77,6 +77,7 @@ fn bad_ar(e: std::io::Error) -> Error {
 
 /// The raw bytes of the control member and the name of the data member.
 fn read_members(path: &Path) -> Result<(Vec<u8>, String)> {
+    check_ar(path)?;
     let file = std::fs::File::open(path).at(path)?;
     let mut archive = ar::Archive::new(file);
     let mut control = None;
@@ -174,7 +175,8 @@ fn parse_fields(text: &str) -> Fields {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_fields;
+    use super::{parse_fields, read_members};
+    use crate::error::Error;
 
     #[test]
     fn control_fields_join_continuations() {
@@ -182,5 +184,40 @@ mod tests {
         assert_eq!(f[0], ("Package".into(), "foo".into()));
         assert_eq!(f[1].1, "one\ntwo\n.");
         assert_eq!(f[2], ("Depends".into(), "a, b".into()));
+    }
+
+    fn ar_with(members: &[(&str, u64, usize)]) -> Vec<u8> {
+        let mut out = b"!<arch>\n".to_vec();
+        for (name, claimed, actual) in members {
+            let header = format!(
+                "{name:<16}{:<12}{:<6}{:<6}{:<8}{claimed:<10}`\n",
+                0, 0, 0, "100644"
+            );
+            out.extend_from_slice(header.as_bytes());
+            out.extend(std::iter::repeat_n(b'x', *actual));
+            if actual % 2 == 1 {
+                out.push(b'\n');
+            }
+        }
+        out
+    }
+
+    fn parse_err(bytes: &[u8]) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.deb");
+        std::fs::write(&path, bytes).unwrap();
+        matches!(read_members(&path), Err(Error::Parse(_)))
+    }
+
+    #[test]
+    fn oversized_ar_members_are_refused() {
+        assert!(parse_err(&ar_with(&[("//", 9_999_999_999, 4)])));
+        assert!(parse_err(&ar_with(&[("debian-binary", 9_999_999_999, 4)])));
+        assert!(parse_err(&ar_with(&[(
+            "//",
+            2 * 1024 * 1024,
+            2 * 1024 * 1024
+        )])));
+        assert!(parse_err(b"!<arch>\nshort"));
     }
 }

@@ -337,6 +337,17 @@ fn rpm_cpio(entries: &[E]) -> Vec<u8> {
 /// Writes an rpm named `name` under `dir`: lead, an empty signature header,
 /// the main header and a gzip cpio payload.
 pub fn build_rpm(dir: &Path, name: &str, t: RpmTags, data: &[E]) -> PathBuf {
+    build_rpm_with(dir, name, t, data, &[])
+}
+
+/// Like [`build_rpm`], with extra string tags `(tag, value)` in the main header.
+pub fn build_rpm_with(
+    dir: &Path,
+    name: &str,
+    t: RpmTags,
+    data: &[E],
+    extra: &[(u32, &str)],
+) -> PathBuf {
     let string = |tag: u32, v: &str| (tag, 6, [v.as_bytes(), &[0]].concat(), 1);
     let mut tags = vec![
         string(1000, t.name),
@@ -346,6 +357,9 @@ pub fn build_rpm(dir: &Path, name: &str, t: RpmTags, data: &[E]) -> PathBuf {
     ];
     if let Some(post) = t.post {
         tags.push(string(1024, post));
+    }
+    for (tag, value) in extra {
+        tags.push(string(*tag, value));
     }
     if !t.source {
         tags.push(string(1044, "foo-1.2.3-1.src.rpm"));

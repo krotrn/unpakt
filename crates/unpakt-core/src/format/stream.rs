@@ -138,9 +138,42 @@ fn link_target<R: Read>(entry: &tar::Entry<'_, R>) -> Result<PathBuf> {
     Ok(target.into_owned())
 }
 
+const AR_HEADER_BYTES: u64 = 60;
+const MAX_AR_NAME_TABLE: u64 = 1024 * 1024;
+
+/// Walks the member headers of the ar archive at `path` without reading any
+/// data, so sizes that exceed the file or a huge GNU name table are refused
+/// before the `ar` crate allocates for them.
+pub(crate) fn check_ar(path: &Path) -> Result<()> {
+    let bad = |what: &str| Error::Parse(format!("invalid ar archive: {what}"));
+    let mut file = File::open(path).at(path)?;
+    let len = file.metadata().at(path)?.len();
+    let mut pos: u64 = 8;
+    while pos < len {
+        file.seek(SeekFrom::Start(pos)).at(path)?;
+        let mut header = [0u8; AR_HEADER_BYTES as usize];
+        file.read_exact(&mut header)
+            .map_err(|_| bad("truncated member header"))?;
+        let size = std::str::from_utf8(&header[48..58])
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .ok_or_else(|| bad("unreadable member size"))?;
+        if header[..2] == *b"//" && size > MAX_AR_NAME_TABLE {
+            return Err(bad("name table is too large"));
+        }
+        let data = pos + AR_HEADER_BYTES;
+        if size > len - data {
+            return Err(bad("member is larger than the file"));
+        }
+        pos = data + size + (size & 1);
+    }
+    Ok(())
+}
+
 /// Opens `path` positioned at the data of the ar member `member`; returns the
 /// file and the member's size.
 fn seek_ar_member(path: &Path, member: &str) -> Result<(File, u64)> {
+    check_ar(path)?;
     let file = File::open(path).at(path)?;
     let bad = |e: std::io::Error| Error::Parse(format!("invalid ar archive: {e}"));
     let mut archive = ar::Archive::new(&file);

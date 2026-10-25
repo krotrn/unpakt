@@ -48,13 +48,6 @@ const COMMANDS: [&str; 9] = [
     ":",
 ];
 
-/// The first line of `text` that is not on the allowlist, trimmed. Scripts are
-/// only ever read, never run.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn unrecognized_line(text: &str, index: &PayloadIndex) -> Option<String> {
-    unrecognized_lines(text, index).into_iter().next()
-}
-
 fn unrecognized_lines(text: &str, index: &PayloadIndex) -> Vec<String> {
     text.lines()
         .map(str::trim)
@@ -277,6 +270,10 @@ mod tests {
 
     fn none() -> PayloadIndex {
         PayloadIndex::default()
+    }
+
+    fn unrecognized_line(text: &str, index: &PayloadIndex) -> Option<String> {
+        unrecognized_lines(text, index).into_iter().next()
     }
 
     #[test]

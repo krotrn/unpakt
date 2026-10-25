@@ -1,8 +1,8 @@
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::package::{Header, inspect_package};
-use super::stream::{DataSource, check_ar, normalize};
+use super::stream::{DataSource, ar_members, normalize};
 use super::{Confidence, FormatPlugin, decompress, peek_head, read_head};
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Arch, Artifact, FormatKind, PackageFamily, Payload, Script};
@@ -77,24 +77,21 @@ fn bad_ar(e: std::io::Error) -> Error {
 
 /// The raw bytes of the control member and the name of the data member.
 fn read_members(path: &Path) -> Result<(Vec<u8>, String)> {
-    check_ar(path)?;
-    let file = std::fs::File::open(path).at(path)?;
-    let mut archive = ar::Archive::new(file);
+    let members = ar_members(path)?;
+    let mut file = std::fs::File::open(path).at(path)?;
     let mut control = None;
     let mut data = None;
-    while let Some(entry) = archive.next_entry() {
-        let mut entry = entry.map_err(bad_ar)?;
-        let name = String::from_utf8_lossy(entry.header().identifier())
-            .trim_end_matches('/')
-            .to_string();
+    for member in members {
+        let name = member.name;
         let packed = name.ends_with(".bz2") || name.ends_with(".lzma");
         if name.starts_with("control.tar") && control.is_none() {
             if packed {
                 return Err(unsupported(&name));
             }
+            file.seek(SeekFrom::Start(member.start)).at(path)?;
             let mut bytes = Vec::new();
-            (&mut entry)
-                .take(MAX_CONTROL_BYTES + 1)
+            (&mut file)
+                .take(member.size.min(MAX_CONTROL_BYTES + 1))
                 .read_to_end(&mut bytes)
                 .map_err(bad_ar)?;
             if bytes.len() as u64 > MAX_CONTROL_BYTES {

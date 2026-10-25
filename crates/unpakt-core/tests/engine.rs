@@ -721,7 +721,7 @@ mod package_gate {
             .unwrap();
         assert!(matches!(plan.compat, Some(Verdict::Risky(_))));
         match engine.install(plan) {
-            Err(Error::Refused(m)) => assert!(m.contains("libnotthere.so.9"), "{m}"),
+            Err(Error::NeedsAcceptance(m)) => assert!(m.contains("libnotthere.so.9"), "{m}"),
             other => panic!("{other:?}"),
         }
         assert!(engine.list().unwrap().is_empty());
@@ -825,9 +825,16 @@ mod package_gate {
             ..AddOpts::default()
         };
         let plan = engine.inspect("https://github.com/o/r", opts).unwrap();
+        let alternative = plan.alternative.clone().unwrap();
+        assert_eq!(alternative.asset, "foo-1.0.AppImage");
+        assert_eq!(alternative.format, FormatKind::AppImage);
+        assert!(
+            alternative.url.ends_with("/foo-1.0.AppImage"),
+            "{alternative:?}"
+        );
         let m = plan.blocked().unwrap();
-        assert!(m.contains("foo-1.0.AppImage"), "{m}");
-        assert!(m.contains("--format appimage"), "{m}");
+        assert!(!m.contains("--"), "front-end flags leaked into {m}");
+        assert!(matches!(plan.refusal(), Some(Error::NeedsAcceptance(_))));
         engine.discard(plan);
     }
 

@@ -35,6 +35,7 @@ pub enum Msg {
     DetailClosed,
     UpdateApp(String),
     RollbackApp(String),
+    UpdateAnyway,
     RemoveClicked(String),
     RemoveApp(String),
 }
@@ -49,6 +50,8 @@ pub struct App {
     /// The installed apps and known updates behind the list.
     apps: Vec<AppRecord>,
     updates: Vec<UpdateInfo>,
+    /// The app of the last update started, for accepting its risks.
+    last_update: Option<String>,
     /// The detail page on top of the list, if one is open.
     detail: Option<Detail>,
     ui: Ui,
@@ -192,6 +195,7 @@ impl SimpleComponent for App {
             may_close,
             apps: Vec::new(),
             updates: Vec::new(),
+            last_update: None,
             detail: None,
             ui: Ui {
                 window: window.clone(),
@@ -290,10 +294,10 @@ impl SimpleComponent for App {
             Msg::Worker(event) => self.on_event(event, &sender),
             Msg::OpenApp(id) => self.open_detail(&id, &sender),
             Msg::DetailClosed => self.detail = None,
-            Msg::UpdateApp(id) => {
-                if self.model.busy == Busy::Idle {
-                    let cancel = self.model.start(Op::Update);
-                    self.worker.emit(Cmd::Update { id, cancel });
+            Msg::UpdateApp(id) => self.start_update(id, false),
+            Msg::UpdateAnyway => {
+                if let Some(id) = self.last_update.clone() {
+                    self.start_update(id, true);
                 }
             }
             Msg::RollbackApp(id) => {
@@ -451,6 +455,7 @@ impl App {
             Effect::OfferWithoutCommand { title, body } => {
                 self.show_shadowed(&title, &body, sender);
             }
+            Effect::OfferUpdateAnyway { body } => self.offer_update_anyway(&body, sender),
             Effect::Toast(text) => self.toast(&text),
             Effect::Close => {
                 self.discard_plan();
@@ -476,6 +481,31 @@ impl App {
             let sender = sender.clone();
             dialog.connect_response(Some("again"), move |_, _| sender.input(Msg::InspectAgain));
         }
+        dialog.present(Some(&self.ui.window));
+    }
+
+    fn start_update(&mut self, id: String, accept_risks: bool) {
+        if self.model.busy == Busy::Idle {
+            let cancel = self.model.start(Op::Update);
+            self.last_update = Some(id.clone());
+            self.worker.emit(Cmd::Update {
+                id,
+                cancel,
+                accept_risks,
+            });
+        }
+    }
+
+    fn offer_update_anyway(&self, body: &str, sender: &ComponentSender<Self>) {
+        let dialog = adw::AlertDialog::new(Some("Update anyway?"), Some(body));
+        dialog.add_response("cancel", "Keep current version");
+        dialog.add_response("update", "Update anyway");
+        dialog.set_response_appearance("update", adw::ResponseAppearance::Destructive);
+        dialog.set_close_response("cancel");
+        let sender = sender.clone();
+        dialog.connect_response(Some("update"), move |_, _| {
+            sender.input(Msg::UpdateAnyway);
+        });
         dialog.present(Some(&self.ui.window));
     }
 

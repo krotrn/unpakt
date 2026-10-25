@@ -52,6 +52,18 @@ pub fn page(plan: &InstallPlan, sender: &ComponentSender<App>) -> adw::Navigatio
         row.add_css_class("error");
         list.append(&row);
     }
+    if let Some(alternative) = &plan.alternative {
+        let row = adw::ActionRow::new();
+        row.set_use_markup(false);
+        row.set_title(&format!("This release also has {}", alternative.asset));
+        row.set_subtitle(&format!(
+            "To install it instead, enter this link: {}",
+            alternative.url
+        ));
+        row.set_subtitle_lines(0);
+        row.set_subtitle_selectable(true);
+        list.append(&row);
+    }
     if let Some(hint) = &plan.native_hint {
         let row = adw::ActionRow::new();
         row.set_use_markup(false);

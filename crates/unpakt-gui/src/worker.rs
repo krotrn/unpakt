@@ -36,6 +36,8 @@ pub enum Cmd {
     Update {
         id: String,
         cancel: Cancel,
+        /// Accept new compatibility problems the update brings.
+        accept_risks: bool,
     },
     Rollback {
         id: String,
@@ -116,10 +118,14 @@ pub fn handle(engine: &mut Engine, cmd: Cmd, emit: &dyn Fn(Event)) {
                 failed: check.failed.len(),
             })
         }),
-        Cmd::Update { id, cancel } => {
+        Cmd::Update {
+            id,
+            cancel,
+            accept_risks,
+        } => {
             engine.set_cancel(cancel);
             engine
-                .update(&id)
+                .update_with(&id, accept_risks)
                 .map(|label| emit(Event::Updated { id, label }))
         }
         Cmd::Rollback { id } => {

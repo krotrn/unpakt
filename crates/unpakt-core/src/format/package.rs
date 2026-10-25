@@ -313,11 +313,23 @@ fn scan(data: &DataSource) -> Result<Scan> {
                     s.index.setuid.push(path.clone());
                 }
                 match seen.get(&target).map(|i| &s.records[*i].kind) {
-                    Some(RecordKind::File { head, .. }) => RecordKind::File {
-                        mode,
-                        head: head.clone(),
-                        text: None,
-                    },
+                    Some(RecordKind::File { head, .. }) => {
+                        let head = head.clone();
+                        if let Some(facts) = s.elf.get(&target).cloned() {
+                            s.elf.insert(path.clone(), facts);
+                        }
+                        if let Some(text) = s.scripts.get(&target).cloned()
+                            && s.kept_scripts + text.len() <= MAX_KEPT_SCRIPT_BYTES
+                        {
+                            s.kept_scripts += text.len();
+                            s.scripts.insert(path.clone(), text);
+                        }
+                        RecordKind::File {
+                            mode,
+                            head,
+                            text: None,
+                        }
+                    }
                     _ => RecordKind::Link,
                 }
             }

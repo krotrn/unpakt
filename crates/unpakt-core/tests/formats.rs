@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    Comp, E, build_appimage, build_ar, build_deb, build_elf, build_tarball, electron_like_with,
-    host_package_arch,
+    Comp, E, RpmTags, build_appimage, build_ar, build_deb, build_elf, build_rpm, build_tarball,
+    electron_like_with, host_package_arch, host_rpm_arch,
 };
 use std::path::Path;
 use unpakt_core::Error;
@@ -217,11 +217,7 @@ fn links_inside_the_root_are_accepted() {
 #[test]
 fn names_unsupported_formats() {
     let tmp = tempfile::tempdir().unwrap();
-    let cases: [(&[u8], &str); 3] = [
-        (b"\xED\xAB\xEE\xDB\x03\x00rest-of-rpm", "rpm"),
-        (b"PK\x03\x04zipdata", "zip"),
-        (ELF, "plain executable"),
-    ];
+    let cases: [(&[u8], &str); 2] = [(b"PK\x03\x04zipdata", "zip"), (ELF, "plain executable")];
     for (i, (bytes, word)) in cases.iter().enumerate() {
         let path = tmp.path().join(format!("f{i}.bin"));
         std::fs::write(&path, bytes).unwrap();
@@ -503,4 +499,91 @@ fn deb_script_entry_keeps_text() {
     assert_eq!(p.entries[0].path, Path::new("usr/bin/foo"));
     let meta = p.package.unwrap();
     assert!(meta.entry_script.unwrap().contains("exec /opt/Foo/foo"));
+}
+
+fn rpm_tags(arch: &str) -> RpmTags<'_> {
+    RpmTags {
+        name: "foo",
+        version: "1.2.3",
+        release: "1",
+        arch,
+        post: None,
+        requires: &[],
+        source: false,
+    }
+}
+
+#[test]
+fn rpm_inspects_metadata_and_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = electron_like_with(
+        tmp.path(),
+        FormatKind::Rpm,
+        "rpmlib(CompressedFileNames)\n/bin/sh\nlibgtk-3.so.0()(64bit)",
+    );
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.format, FormatKind::Rpm);
+    assert_eq!(p.version.as_deref(), Some("1.2.3-1"));
+    assert_eq!(p.entries[0].path, Path::new("opt/Foo/foo"));
+    let meta = p.package.unwrap();
+    assert_eq!(meta.depends, ["libgtk-3.so.0()(64bit)"]);
+    assert_eq!(meta.scripts[0].name, "%post");
+    assert!(meta.scripts[0].text.contains("update-desktop-database"));
+    assert_eq!(meta.index.setuid, [Path::new("opt/Foo/chrome-sandbox")]);
+    assert!(meta.elf.contains_key(Path::new("opt/Foo/foo")));
+}
+
+#[test]
+fn rpm_noarch_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [E::File("opt/foo/foo", &elf, 0o755)];
+    let path = build_rpm(tmp.path(), "a.rpm", rpm_tags("noarch"), &data);
+    assert!(inspect(&path).is_ok());
+}
+
+#[test]
+fn rpm_aarch64_refused_on_x86_64() {
+    if host_rpm_arch() != "x86_64" {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let path = build_rpm(tmp.path(), "a.rpm", rpm_tags("aarch64"), &[]);
+    assert!(matches!(inspect(&path), Err(Error::Refused(_))));
+}
+
+#[test]
+fn rpm_source_package_unsupported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut tags = rpm_tags("x86_64");
+    tags.source = true;
+    let path = build_rpm(tmp.path(), "a.src.rpm", tags, &[]);
+    assert!(matches!(inspect(&path), Err(Error::Unsupported(_))));
+}
+
+#[test]
+fn rpm_truncated_header_is_parse_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = electron_like_with(tmp.path(), FormatKind::Rpm, "");
+    let bytes = std::fs::read(&path).unwrap();
+    for cut in [10, 100, 150] {
+        std::fs::write(&path, &bytes[..cut]).unwrap();
+        assert!(matches!(inspect(&path), Err(Error::Parse(_))), "cut {cut}");
+    }
+}
+
+#[test]
+fn rpm_hard_linked_entry_keeps_elf_facts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&["libc.so.6"], None, &[], &[]);
+    let data = [
+        E::File("opt/foo/real", &elf, 0o755),
+        E::Hard("opt/foo/foo", "opt/foo/real"),
+    ];
+    let path = build_rpm(tmp.path(), "a.rpm", rpm_tags("noarch"), &data);
+    let p = inspect(&path).unwrap();
+    let meta = p.package.unwrap();
+    assert!(meta.elf.contains_key(Path::new("opt/foo/foo")));
+    assert!(meta.elf.contains_key(Path::new("opt/foo/real")));
+    assert!(meta.index.files.contains(Path::new("opt/foo/foo")));
 }

@@ -12,6 +12,7 @@ pub mod appimage;
 pub(crate) mod cpio;
 pub mod deb;
 pub(crate) mod package;
+pub mod rpm;
 pub mod stream;
 pub mod tarball;
 mod tree;
@@ -32,11 +33,12 @@ pub trait FormatPlugin: Sync {
 }
 
 static DEB: deb::Deb = deb::Deb;
+static RPM: rpm::Rpm = rpm::Rpm;
 static APPIMAGE: appimage::AppImage = appimage::AppImage;
 static TARBALL: tarball::Tarball = tarball::Tarball;
 
-fn registry() -> [&'static dyn FormatPlugin; 3] {
-    [&DEB, &APPIMAGE, &TARBALL]
+fn registry() -> [&'static dyn FormatPlugin; 4] {
+    [&DEB, &RPM, &APPIMAGE, &TARBALL]
 }
 
 /// Picks the plugin that recognises `a`, or names the unsupported format.
@@ -56,9 +58,7 @@ pub fn detect(a: &Artifact) -> Result<&'static dyn FormatPlugin> {
 }
 
 fn unsupported_name(head: &[u8]) -> &'static str {
-    if head.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) {
-        "rpm package"
-    } else if head.starts_with(b"PK\x03\x04") {
+    if head.starts_with(b"PK\x03\x04") {
         "zip archive"
     } else if head.starts_with(b"\x7fELF") {
         "plain executable"

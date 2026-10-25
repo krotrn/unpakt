@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::model::Arch;
+use crate::model::{Arch, PackageFamily};
 
 const FUSE2_LIB_DIRS: [&str; 4] = [
     "/usr/lib",
@@ -36,6 +36,44 @@ impl Host {
             immutable_root,
             fuse2,
         }
+    }
+}
+
+impl Host {
+    /// The package family of this distribution, from `ID` then each `ID_LIKE` entry.
+    pub fn family(&self) -> Option<PackageFamily> {
+        self.os_id
+            .iter()
+            .chain(self.os_like.iter())
+            .find_map(|id| family_of(id))
+    }
+}
+
+fn family_of(id: &str) -> Option<PackageFamily> {
+    match id {
+        "debian" | "ubuntu" => Some(PackageFamily::Deb),
+        "fedora" | "rhel" | "centos" | "suse" => Some(PackageFamily::Rpm),
+        "arch" => Some(PackageFamily::Pacman),
+        _ if id.starts_with("opensuse") => Some(PackageFamily::Rpm),
+        _ => None,
+    }
+}
+
+/// The command that installs `file` system-wide with the host's package manager.
+pub fn native_install_hint(family: PackageFamily, file: &Path) -> String {
+    let path = file.to_string_lossy();
+    let safe = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._+-".contains(c));
+    let path = if safe {
+        path.into_owned()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    };
+    match family {
+        PackageFamily::Deb => format!("sudo apt install {path}"),
+        PackageFamily::Rpm => format!("sudo dnf install {path}"),
+        PackageFamily::Pacman => format!("sudo pacman -U {path}"),
     }
 }
 
@@ -89,6 +127,46 @@ pub fn root_is_readonly(proc_mounts: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host_with(id: &str, like: &[&str]) -> Host {
+        Host {
+            arch: Arch::current(),
+            os_id: Some(id.to_string()),
+            os_like: like.iter().map(|s| s.to_string()).collect(),
+            immutable_root: false,
+            fuse2: false,
+        }
+    }
+
+    #[test]
+    fn family_from_os_release() {
+        assert_eq!(host_with("ubuntu", &[]).family(), Some(PackageFamily::Deb));
+        assert_eq!(
+            host_with("linuxmint", &["ubuntu", "debian"]).family(),
+            Some(PackageFamily::Deb)
+        );
+        assert_eq!(
+            host_with("opensuse-tumbleweed", &["suse"]).family(),
+            Some(PackageFamily::Rpm)
+        );
+        assert_eq!(
+            host_with("endeavouros", &["arch"]).family(),
+            Some(PackageFamily::Pacman)
+        );
+        assert_eq!(host_with("nixos", &[]).family(), None);
+    }
+
+    #[test]
+    fn install_hint_per_family() {
+        assert_eq!(
+            native_install_hint(PackageFamily::Pacman, Path::new("/tmp/a b.pkg.tar.zst")),
+            "sudo pacman -U '/tmp/a b.pkg.tar.zst'"
+        );
+        assert_eq!(
+            native_install_hint(PackageFamily::Deb, Path::new("/tmp/x.deb")),
+            "sudo apt install /tmp/x.deb"
+        );
+    }
 
     #[test]
     fn parses_unquoted_id() {

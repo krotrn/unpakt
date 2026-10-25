@@ -377,6 +377,30 @@ pub fn build_rpm(dir: &Path, name: &str, t: RpmTags, data: &[E]) -> PathBuf {
     path
 }
 
+/// Writes a pacman package named `name` under `dir`: `.PKGINFO` first, then
+/// the optional `.INSTALL`, then `data`.
+pub fn build_pacman(
+    dir: &Path,
+    name: &str,
+    pkginfo: &str,
+    install: Option<&str>,
+    data: &[E],
+    comp: Comp,
+) -> PathBuf {
+    let mut entries = vec![E::File(".PKGINFO", pkginfo.as_bytes(), 0o644)];
+    if let Some(text) = install {
+        entries.push(E::File(".INSTALL", text.as_bytes(), 0o644));
+    }
+    for e in data {
+        entries.push(match e {
+            E::File(p, d, m) => E::File(p, d, *m),
+            E::Link(p, t) => E::Link(p, t),
+            E::Hard(p, t) => E::Hard(p, t),
+        });
+    }
+    build_tarball(dir, name, comp, &entries)
+}
+
 /// An Electron-style app packaged as `format`: a launcher link, a setuid
 /// helper, a desktop file, an icon and a postinst script. Version `1.2.3`.
 pub fn electron_like(dir: &Path, format: unpakt_core::model::FormatKind) -> PathBuf {
@@ -430,6 +454,20 @@ pub fn electron_like_with(
                     source: false,
                 },
                 &data,
+            )
+        }
+        unpakt_core::model::FormatKind::Pacman => {
+            let pkginfo = format!(
+                "pkgname = foo\npkgver = 1.2.3-1\narch = {}\n{extra_control}",
+                host_rpm_arch()
+            );
+            build_pacman(
+                dir,
+                "foo-1.2.3-1-pkg.pkg.tar.zst",
+                &pkginfo,
+                Some(std::str::from_utf8(postinst).unwrap()),
+                &data,
+                Comp::Zst,
             )
         }
         other => unimplemented!("electron_like for {other:?}"),

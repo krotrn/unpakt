@@ -13,6 +13,14 @@ fn version_text(label: &str, raw: Option<&str>) -> String {
     }
 }
 
+/// Replaces control characters in text that came from a package, so it cannot
+/// move the cursor or inject terminal escape sequences.
+fn clean(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
 pub fn print_summary(p: &InstallPlan) {
     for line in summary_lines(p) {
         println!("{line}");
@@ -60,7 +68,7 @@ pub fn summary_lines(p: &InstallPlan) -> Vec<String> {
             .map(|w| format!("warning: {w}")),
     );
     out.extend(compat_lines(p.compat.as_ref(), p.native_hint.as_deref()));
-    out
+    out.iter().map(|line| clean(line)).collect()
 }
 
 fn compat_lines(compat: Option<&Verdict>, native_hint: Option<&str>) -> Vec<String> {
@@ -87,27 +95,30 @@ pub fn print_list(apps: &[AppRecord]) {
     for app in apps {
         println!(
             "{}  {}  {}  {}  {}",
-            app.id,
-            app.current,
+            clean(&app.id),
+            clean(&app.current),
             app.format.as_str(),
-            app.name,
-            app.source.location
+            clean(&app.name),
+            clean(&app.source.location)
         );
     }
 }
 
 pub fn print_info(app: &AppRecord, versions: &[VersionRecord], files: &[FileRecord]) {
     println!("id:      {}", app.id);
-    println!("name:    {}", app.name);
+    println!("name:    {}", clean(&app.name));
     println!("format:  {}", app.format.as_str());
     println!("backend: {}", app.backend);
     println!("source:  {}", app.source.location);
     println!("current: {}", app.current);
     for v in versions {
-        println!("version: {}", version_text(&v.label, v.version.as_deref()));
+        println!(
+            "version: {}",
+            clean(&version_text(&v.label, v.version.as_deref()))
+        );
     }
     for f in files {
-        println!("file:    {}", f.path.display());
+        println!("file:    {}", clean(&f.path.display().to_string()));
     }
 }
 
@@ -126,7 +137,7 @@ pub fn print_updates(updates: &[UpdateInfo]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{compat_lines, version_text};
+    use super::{clean, compat_lines, version_text};
     use unpakt_core::compat::{Finding, Verdict};
 
     fn finding(tag: &'static str, detail: &str, note: bool) -> Finding {
@@ -184,5 +195,14 @@ mod tests {
     fn matching_or_missing_raw_version_shows_the_label_only() {
         assert_eq!(version_text("0.12.6", Some("0.12.6")), "0.12.6");
         assert_eq!(version_text("ab12cd34ef56", None), "ab12cd34ef56");
+    }
+
+    #[test]
+    fn control_characters_are_replaced() {
+        assert_eq!(
+            clean("a\x1b[31mb\r\n\x07c"),
+            "a\u{FFFD}[31mb\u{FFFD}\u{FFFD}\u{FFFD}c"
+        );
+        assert_eq!(clean("plain ünï"), "plain ünï");
     }
 }

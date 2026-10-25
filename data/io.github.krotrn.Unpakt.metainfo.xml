@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.krotrn.Unpakt</id>
   <name>unpakt</name>
-  <summary>Install and manage AppImages and tarballs per user</summary>
+  <summary>Install and manage AppImages, tarballs and packages per user</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
   <developer id="io.github.krotrn">
@@ -10,8 +10,8 @@
   </developer>
   <description>
     <p>
-      unpakt installs portable Linux apps (AppImages and tarballs) for your
-      user account from a file, a download URL or a GitHub repository, and adds
+      unpakt installs portable Linux apps (AppImages, tarballs and deb, rpm and
+      pacman packages) for your user account from a file, a download URL or a GitHub repository, and adds
       them to your application menu and command path.
     </p>
     <p>

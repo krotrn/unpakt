@@ -29,6 +29,69 @@ fn fixture_tarball_named(dir: &Path, file_name: &str) -> PathBuf {
     path
 }
 
+fn ar_member(out: &mut Vec<u8>, name: &str, data: &[u8]) {
+    out.extend_from_slice(
+        format!(
+            "{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+            0,
+            0,
+            0,
+            "100644",
+            data.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        out.push(b'\n');
+    }
+}
+
+fn gz_tar(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+    for (path, body, mode) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(*mode);
+        header.set_entry_type(tar::EntryType::Regular);
+        builder
+            .append_data(&mut header, format!("./{path}"), *body)
+            .unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
+/// A deb whose postinst creates an account, which the compatibility check
+/// reports as risky.
+fn risky_deb(dir: &Path) -> PathBuf {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let control = format!(
+        "Package: riskyfoo\nVersion: 1.0\nArchitecture: {arch}\nMaintainer: t <t@example.org>\n"
+    );
+    let mut bytes = b"!<arch>\n".to_vec();
+    ar_member(&mut bytes, "debian-binary", b"2.0\n");
+    ar_member(
+        &mut bytes,
+        "control.tar.gz",
+        &gz_tar(&[
+            ("control", control.as_bytes(), 0o644),
+            ("postinst", b"#!/bin/sh\nuseradd riskyfoo\n", 0o755),
+        ]),
+    );
+    ar_member(
+        &mut bytes,
+        "data.tar.gz",
+        &gz_tar(&[("opt/riskyfoo/riskyfoo", b"#!/bin/sh\necho hi\n", 0o755)]),
+    );
+    let path = dir.join("riskyfoo_1.0_pkg.deb");
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
 fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_unpakt"))
         .env_clear()
@@ -612,4 +675,21 @@ fn self_uninstall_fails_when_the_install_is_unknown() {
     let out = run(tmp.path(), &["self", "uninstall", "--yes"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).contains("#install"), "{}", stderr(&out));
+}
+
+#[test]
+fn add_risky_deb_is_refused_and_installs_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let deb = risky_deb(tmp.path());
+    let out = run(tmp.path(), &["add", "--yes", deb.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("--allow-risky"), "{}", stderr(&out));
+    let list = run(tmp.path(), &["list"]);
+    assert!(!stdout(&list).contains("riskyfoo"), "{}", stdout(&list));
 }

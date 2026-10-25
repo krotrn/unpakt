@@ -235,8 +235,9 @@ headers, and reports a verdict. This writes nothing to disk:
   unavailable, or an install script that sets up accounts, capabilities or
   kernel settings (`useradd`, `setcap`, `sysctl`, `dkms` and the like).
   `add` and `update` refuse a risky package with exit status 2. Pass
-  `--allow-risky` to install it anyway; the reasons you accepted are remembered
-  for that app, and a later update stops again only when a new reason appears.
+  `--allow-risky` (in the app: Install anyway or Update anyway) to install it
+  anyway; the reasons you accepted are remembered for that app, and a later
+  update stops again only when a new reason appears.
 - `needs-container`: the package needs newer system libraries (for example
   glibc) than this machine has, which a per-user install cannot provide. There
   is no override.
@@ -248,6 +249,12 @@ them as text. Lines it does not recognise are shown as notes, and only
 account, capability and kernel setup commands (`useradd`, `setcap`, `sysctl`,
 `modprobe`, `dkms` and the like) make a package risky. A package that needs its
 script to do something beyond that will not have had it done.
+
+Some vendors ship a launcher script that looks for its files under
+`/usr/share/<app>` or `/opt/<app>`. unpakt does not rewrite vendor files, so
+such a package comes out risky with the path named. When the vendor also offers
+a tarball, install that instead: Discord's deb is refused this way, while its
+tar.gz works, because its launcher also looks next to itself.
 
 Installing system-wide, through the package manager, comes in a later release.
 

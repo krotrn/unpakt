@@ -15,10 +15,15 @@ fn version_text(label: &str, raw: Option<&str>) -> String {
 
 /// Replaces control characters in text that came from a package, so it cannot
 /// move the cursor or inject terminal escape sequences.
-fn clean(text: &str) -> String {
+pub fn clean(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
         .collect()
+}
+
+/// Like [`clean`], but keeps the line breaks of a multi-line message.
+pub fn clean_lines(text: &str) -> String {
+    text.split('\n').map(clean).collect::<Vec<_>>().join("\n")
 }
 
 pub fn print_summary(p: &InstallPlan) {
@@ -36,7 +41,7 @@ pub fn summary_lines(p: &InstallPlan) -> Vec<String> {
             version_text(&plan.label, plan.payload.version.as_deref())
         ),
         format!("id:      {}", plan.id),
-        format!("source:  {}", p.source.location),
+        format!("source:  {}", clean(&p.source.location)),
         format!("asset:   {}", plan.artifact.file_name),
         format!("format:  {} -> {}", plan.payload.format.as_str(), p.backend),
     ];
@@ -109,8 +114,8 @@ pub fn print_info(app: &AppRecord, versions: &[VersionRecord], files: &[FileReco
     println!("name:    {}", clean(&app.name));
     println!("format:  {}", app.format.as_str());
     println!("backend: {}", app.backend);
-    println!("source:  {}", app.source.location);
-    println!("current: {}", app.current);
+    println!("source:  {}", clean(&app.source.location));
+    println!("current: {}", clean(&app.current));
     for v in versions {
         println!(
             "version: {}",
@@ -125,19 +130,19 @@ pub fn print_info(app: &AppRecord, versions: &[VersionRecord], files: &[FileReco
 pub fn print_checks(checks: &[Check]) {
     for c in checks {
         let mark = if c.ok { "[ok]" } else { "[!!]" };
-        println!("{mark} {}: {}", c.name, c.detail);
+        println!("{mark} {}: {}", c.name, clean(&c.detail));
     }
 }
 
 pub fn print_updates(updates: &[UpdateInfo]) {
     for u in updates {
-        println!("{}  {}  ->  {}", u.id, u.current, u.latest);
+        println!("{}  {}  ->  {}", u.id, clean(&u.current), clean(&u.latest));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{clean, compat_lines, version_text};
+    use super::{clean, clean_lines, compat_lines, version_text};
     use unpakt_core::compat::{Finding, Verdict};
 
     fn finding(tag: &'static str, detail: &str, note: bool) -> Finding {
@@ -204,5 +209,13 @@ mod tests {
             "a\u{FFFD}[31mb\u{FFFD}\u{FFFD}\u{FFFD}c"
         );
         assert_eq!(clean("plain ünï"), "plain ünï");
+    }
+
+    #[test]
+    fn message_cleaning_keeps_line_breaks() {
+        assert_eq!(
+            clean_lines("refused\n  - bad\x1b[2Jdetail"),
+            "refused\n  - bad\u{FFFD}[2Jdetail"
+        );
     }
 }

@@ -12,6 +12,7 @@ pub mod appimage;
 pub(crate) mod cpio;
 pub mod stream;
 pub mod tarball;
+mod tree;
 
 pub use appimage::squashfs_offset;
 

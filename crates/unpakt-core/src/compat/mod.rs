@@ -662,6 +662,7 @@ mod tests {
                     v.iter()
                         .any(|f| f.tag == "setuid" && f.detail.starts_with("postinst"))
                 );
+                assert!(v.iter().any(|f| f.tag == "maintainer-script"));
             }
             other => panic!("{other:?}"),
         }

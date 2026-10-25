@@ -1,33 +1,95 @@
 # unpakt
 
-unpakt installs portable Linux apps (AppImages, tarballs and deb, rpm and
-pacman packages) for your user account, from a local file, a download URL or a GitHub repository. It gives
-each app a launcher entry and, if you want, a command on your `PATH`, keeps
-the previous versions so you can roll back, and updates apps when you ask it
-to. It never needs root and never writes outside your home directory.
+**Install any Linux app for your user: AppImages, tarballs, and `.deb`, `.rpm`
+or pacman packages. No root, no vendor install scripts, and a one-step
+rollback when an update breaks something.**
 
-Use it from the terminal (`unpakt`) or from the GTK 4 / libadwaita app
-(`unpakt-gui`).
+[![CI](https://github.com/krotrn/unpakt/actions/workflows/ci.yml/badge.svg)](https://github.com/krotrn/unpakt/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/krotrn/unpakt)](https://github.com/krotrn/unpakt/releases/latest)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Website](https://img.shields.io/badge/docs-krotrn.github.io%2Funpakt-informational)](https://krotrn.github.io/unpakt/)
+
+```sh
+unpakt add https://github.com/obsidianmd/obsidian-releases
+```
+
+That one command finds the latest release, picks the file that fits your
+machine, adds the app to your applications menu and puts an `obsidian` command
+on your `PATH`. Later, `unpakt update` gets the new version and
+`unpakt rollback obsidian` takes you back if it misbehaves. Use it from the
+terminal (`unpakt`) or from the GTK 4 / libadwaita app (`unpakt-gui`).
+
+![unpakt's main window](website/screenshots/main.png)
+
+## Why unpakt
+
+- **The app only ships a `.deb`, and you're on Fedora or Arch.** unpakt unpacks
+  `.deb`, `.rpm` and pacman packages into your home directory, on any
+  distribution, and tells you first whether the app is expected to run there.
+- **You'd rather not run a vendor's install scripts as root.** unpakt never
+  asks for root and never runs a package's install scripts. It reads them, and
+  tells you if they would have set up accounts, services or kernel modules.
+- **Your AppImages live in `~/Downloads`, with no menu entry and no updates.**
+  unpakt gives each app a launcher entry with its icon, a command, and updates
+  when you ask for them.
+- **An update broke your app.** The last three versions stay on disk, so
+  `unpakt rollback` is instant.
+- **Installs that can't leave a mess.** Every install, update and removal is a
+  transaction: Ctrl-C, an error or a power cut is undone on the next run.
+
+## See before you install
+
+`unpakt inspect` looks inside a file without running anything or changing your
+system. Here it is on Obsidian's `.deb`, on an Arch machine:
+
+```console
+$ unpakt inspect ~/Downloads/obsidian_1.14.5_amd64.deb
+name:    Obsidian
+version: 1.14.5
+id:      obsidian
+source:  ~/Downloads/obsidian_1.14.5_amd64.deb
+asset:   obsidian_1.14.5_amd64.deb
+format:  deb -> extract
+entry:   opt/Obsidian/obsidian
+  other: opt/Obsidian/obsidian-cli
+  other: opt/Obsidian/chrome-sandbox
+  other: opt/Obsidian/chrome_crashpad_handler
+command: obsidian
+desktop: yes
+Compatibility: ok
+  note: postinst would set the setuid bit (chmod 4755 '/opt/Obsidian/chrome-sandbox' || true); it is not set
+  note: postinst was not run; first unrecognized line: if type update-alternatives >/dev/null 2>&1; then
+  note: postrm was not run; first unrecognized line: if type update-alternatives >/dev/null 2>&1; then
+```
+
+The [compatibility check](#compatibility-check) looked for missing libraries,
+paths that won't exist outside `/opt`, system services and risky install
+scripts. It found nothing that stops Obsidian from running here, and it lists
+what the install scripts would have done.
+
+## What it installs
+
+| Format | From | How |
+| --- | --- | --- |
+| AppImage | file, URL, GitHub release | Run in place, or extracted where FUSE 2 is missing |
+| Tarball (`.tar.gz`, `.tar.xz`, `.tar.zst`, …) | file, URL, GitHub release | Unpacked; the program and icon are found for you |
+| `.deb`, `.rpm`, pacman (`.pkg.tar.zst`) | file, URL, GitHub release | Unpacked into your home after the compatibility check; scripts never run |
+
+Given a GitHub repository, unpakt prefers an AppImage, then a tarball, then a
+package for your distribution. `--format` picks one explicitly.
 
 ## Features
 
-- Install an AppImage, a tarball or a `.deb`, `.rpm` or pacman package from a
-  file, a URL or a GitHub repo. Packages are unpacked into your home directory;
-  nothing is installed system-wide and no install script is run.
-- A [compatibility check](#compatibility-check) tells you whether a package is
-  expected to run on this machine before it is installed.
 - Launcher entry with the app's own icon, and a command in `~/.local/bin`.
 - `inspect` shows what an install would do before anything is changed.
-- `update` fetches the latest release; `rollback` goes back one version
-  (the last three versions are kept).
-- Installs and updates are transactional: a failure or a Ctrl-C undoes the
-  change, and a crash is recovered on the next run.
-- Per user only: no root, no system packages touched.
+- `update` fetches the latest release and keeps the format you installed;
+  `rollback` goes back one version (the last three versions are kept).
+- Transactional installs, updates and removals, with crash recovery.
+- Per user only: no root, nothing written outside your home directory.
 - `doctor` checks the installation for problems.
 - Shell completion for bash, zsh and fish (and elvish, PowerShell).
-- A GUI with the same install, update, rollback and remove actions.
-
-![unpakt's main window](website/screenshots/main.png)
+- A desktop app with the same install, update, rollback and remove actions,
+  including the compatibility verdict and its confirmations.
 
 ## Install
 
@@ -354,6 +416,18 @@ pacman packages. A `.zip` or a bare executable is refused.
 privileges, cannot break the system's packages, and lets each user have their
 own apps. Everything unpakt writes is under `~/.local` and `~/.cache`.
 
+**Is installing a `.deb` with unpakt the same as `apt install`?** No. unpakt
+unpacks the package's files into your home directory, rewrites its links to
+point there, and never runs its install scripts or resolves its dependencies.
+That suits self-contained apps, which is most vendor packages (VS Code, Slack,
+Obsidian and the like). A package that needs a system service, a new user
+account or a kernel module comes out `risky` and is refused unless you accept
+it; one that needs newer system libraries than you have is refused outright.
+
+**Will a package built for another distribution work?** Often, for
+self-contained apps. `unpakt inspect` tells you before anything is installed:
+it checks every library the program needs against your system.
+
 **Where are my apps stored?** See [Where files go](#where-files-go).
 `unpakt info <id>` lists every file created for one app.
 
@@ -388,6 +462,8 @@ Short and incomplete; each tool has its strengths.
 | Gear Lever | GUI manager for AppImages | unpakt has a CLI as well as a GUI, and installs tarballs and packages |
 | AM / appman | A large script-based catalogue of portable apps | unpakt has no catalogue: you point it at a repo, URL or file |
 | eget, bin | Download a release binary from GitHub | unpakt also creates launcher entries and icons, keeps versions and can roll back |
+| `dpkg -x`, `rpm2cpio`, `bsdtar` by hand | Unpack a package's files | unpakt also checks that the app can run, fixes its links and paths, adds a launcher and a command, and can update and roll back |
+| distrobox | Runs another distribution in a container | unpakt unpacks the package straight into your home without a container, and tells you when an app does need one |
 
 ## Contributing
 
@@ -414,6 +490,12 @@ then a release has no `SHA256SUMS.minisig`.
 
 - unpakt does not verify checksums or signatures of the apps it installs yet.
 - unpakt does not check for updates in the background yet; run `unpakt update`.
+- Packages are unpacked, not installed through your package manager: their
+  dependencies are not installed and their install scripts never run. Apps
+  that need either are flagged by the compatibility check.
+- Some vendors ship a `.deb` that is only a launcher looking for files under
+  `/usr/share` or `/opt`; use their tarball instead (see
+  [Compatibility check](#compatibility-check)).
 - x86_64 only.
 
 ## Release secrets (maintainers)

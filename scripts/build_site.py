@@ -21,14 +21,15 @@ ROOT_PAGES = ("ARCHITECTURE.md", "CONTRIBUTING.md", "CHANGELOG.md")
 # page in site-src -> (title, description)
 PAGES = {
     "index.md": (
-        "unpakt: install AppImages, tarballs and packages on Linux, per user",
-        "Install portable Linux apps from a file, a download URL or a GitHub repository, "
-        "with launcher entries, updates and rollback. Command line and GTK 4 app.",
+        "unpakt: install AppImages, .deb, .rpm and pacman packages on any Linux, without root",
+        "Install AppImages, tarballs and .deb, .rpm or pacman packages for your user on "
+        "any Linux distribution, from a file, a URL or a GitHub repository. No root, no "
+        "install scripts run, a compatibility check first, updates and one-step rollback.",
     ),
     "how-it-works.md": (
         "How unpakt installs, updates and rolls back apps",
-        "What happens when you install an app with unpakt, where its files go, and how "
-        "an interrupted install is undone.",
+        "What happens when you install an app or a .deb, .rpm or pacman package with "
+        "unpakt, where its files go, and how an interrupted install is undone.",
     ),
     "ARCHITECTURE.md": (
         "unpakt architecture",

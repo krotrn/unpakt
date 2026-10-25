@@ -137,6 +137,30 @@ fn root_level_tarball_has_no_prefix_and_root_icon() {
 }
 
 #[test]
+fn tarball_launcher_beside_its_helper_is_the_entry() {
+    // Discord's tarball: a launcher script that starts the updater next to it.
+    let tmp = tempfile::tempdir().unwrap();
+    let desktop = b"[Desktop Entry]\nType=Application\nName=Discord\nExec=/usr/bin/discord %u\n";
+    let path = build_tarball(
+        tmp.path(),
+        "discord.tar.gz",
+        Comp::Gz,
+        &[
+            E::File(
+                "Discord/discord",
+                b"#!/bin/sh\nexec \"$(dirname \"$0\")/updater_bootstrap\"\n",
+                0o755,
+            ),
+            E::File("Discord/updater_bootstrap", ELF, 0o755),
+            E::File("Discord/discord.desktop", desktop, 0o644),
+        ],
+    );
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.strip_prefix.as_deref(), Some(Path::new("Discord")));
+    assert_eq!(p.entries[0].path, Path::new("discord"));
+}
+
+#[test]
 fn refuses_source_tarball() {
     let tmp = tempfile::tempdir().unwrap();
     let path = build_tarball(

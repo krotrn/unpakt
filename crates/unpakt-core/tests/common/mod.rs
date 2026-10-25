@@ -388,3 +388,31 @@ fn serve(
     stream.flush()?;
     Ok(())
 }
+
+/// A `newc` cpio archive of `(name, mode, data or link target)` entries,
+/// ended by a trailer.
+pub fn newc(entries: &[(&str, u32, &[u8])]) -> Vec<u8> {
+    fn record(ino: u32, mode: u32, name: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "070701{ino:08X}{mode:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}",
+            0, 0, 1, 0, data.len(), 0, 0, 0, 0, name.len() + 1, 0
+        )
+        .into_bytes();
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out.extend_from_slice(data);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out
+    }
+    let mut out = Vec::new();
+    for (i, (name, mode, data)) in entries.iter().enumerate() {
+        out.extend(record(i as u32 + 1, *mode, name, data));
+    }
+    out.extend(record(0, 0, "TRAILER!!!", b""));
+    out
+}

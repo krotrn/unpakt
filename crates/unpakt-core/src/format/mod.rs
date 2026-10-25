@@ -2,13 +2,14 @@
 //! executes anything.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Artifact, FormatKind, Payload};
 
 pub mod appimage;
+pub(crate) mod cpio;
 pub mod stream;
 pub mod tarball;
 
@@ -98,26 +99,30 @@ impl Compression {
     }
 }
 
-/// Opens `path` as a tar stream, decompressing according to its magic bytes.
-pub(crate) fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
-    let mut file = File::open(path).at(path)?;
-    let mut head = [0u8; 6];
-    let mut got = 0;
-    while got < head.len() {
-        let n = file.read(&mut head[got..]).at(path)?;
-        if n == 0 {
-            break;
-        }
-        got += n;
-    }
-    file.seek(SeekFrom::Start(0)).at(path)?;
-    let reader = BufReader::new(file);
-    let stream: Box<dyn Read> = match Compression::from_magic(&head[..got]) {
+/// Wraps `reader` in the decompressor selected by the magic bytes in `head`.
+pub(crate) fn decompress(reader: impl BufRead + 'static, head: &[u8]) -> Result<Box<dyn Read>> {
+    Ok(match Compression::from_magic(head) {
         Compression::None => Box::new(reader),
         Compression::Gzip => Box::new(flate2::bufread::MultiGzDecoder::new(reader)),
         Compression::Xz => Box::new(liblzma::bufread::XzDecoder::new(reader)),
-        Compression::Zstd => Box::new(zstd::Decoder::with_buffer(reader).at(path)?),
+        Compression::Zstd => Box::new(
+            zstd::Decoder::with_buffer(reader)
+                .map_err(|e| Error::Parse(format!("invalid zstd stream: {e}")))?,
+        ),
         Compression::Bzip2 => Box::new(bzip2::bufread::MultiBzDecoder::new(reader)),
-    };
-    Ok(tar::Archive::new(stream))
+    })
+}
+
+/// Opens `path` as a tar stream, decompressing according to its magic bytes.
+pub(crate) fn open_tar(path: &Path) -> Result<tar::Archive<Box<dyn Read>>> {
+    let file = File::open(path).at(path)?;
+    let mut reader = BufReader::new(file);
+    let head = peek_head(&mut reader).at(path)?;
+    Ok(tar::Archive::new(decompress(reader, &head)?))
+}
+
+/// Copies the first bytes of `reader` without consuming them.
+pub(crate) fn peek_head(reader: &mut impl BufRead) -> std::io::Result<Vec<u8>> {
+    let buf = reader.fill_buf()?;
+    Ok(buf[..buf.len().min(6)].to_vec())
 }

@@ -498,21 +498,6 @@ then a release has no `SHA256SUMS.minisig`.
   [Compatibility check](#compatibility-check)).
 - x86_64 only.
 
-## Release secrets (maintainers)
-
-Each is optional; the matching release step is skipped with a notice when it is
-not set.
-
-- `AUR_SSH_PRIVATE_KEY`: publish to the AUR
-- `ARCH_GPG_PRIVATE_KEY`: sign the pacman repository; the key must not have a
-  passphrase
-- `MINISIGN_SECRET_KEY` and optional `MINISIGN_PASSWORD`: create
-  `SHA256SUMS.minisig`
-- `CARGO_REGISTRY_TOKEN`, or the repository variable
-  `CRATES_IO_TRUSTED_PUBLISHING=true`: publish to crates.io. The first
-  publish of each crate needs `CARGO_REGISTRY_TOKEN`, because trusted
-  publishing only works for crates that already exist.
-
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

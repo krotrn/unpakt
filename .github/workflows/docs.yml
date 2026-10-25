@@ -13,7 +13,7 @@ on:
       - CONTRIBUTING.md
       - CHANGELOG.md
       - website/**
-      - mkdocs.yml
+      - zensical.toml
       - scripts/build_site.py
       - .github/workflows/docs.yml
   pull_request:
@@ -23,7 +23,7 @@ on:
       - CONTRIBUTING.md
       - CHANGELOG.md
       - website/**
-      - mkdocs.yml
+      - zensical.toml
       - scripts/build_site.py
       - .github/workflows/docs.yml
   workflow_dispatch:
@@ -49,14 +49,14 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install MkDocs
-        # MkDocs 2.0 drops the plugin and theme system Material relies on.
-        run: python -m pip install "mkdocs>=1.6,<2" "mkdocs-material>=9.7,<10"
+      - name: Install Zensical
+        # Zensical is pre-1.0; a minor release may change the configuration.
+        run: python -m pip install "zensical>=0.0.72,<0.1"
 
       - name: Build
         run: |
           python scripts/build_site.py
-          mkdocs build --strict
+          zensical build --clean --strict
 
       - name: Upload site
         if: github.event_name != 'pull_request'
@@ -77,6 +77,9 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v5

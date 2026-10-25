@@ -25,7 +25,7 @@ gui-smoke:
 	cargo build -p unpakt-gui --locked
 	dbus-run-session -- python3 scripts/gui_smoke.py target/debug/unpakt-gui
 
-# Needs mkdocs and mkdocs-material; serves the site on http://127.0.0.1:8000.
+# Needs zensical (pip install zensical); serves the site on http://127.0.0.1:8000.
 site:
 	python3 scripts/build_site.py
-	mkdocs serve
+	zensical serve

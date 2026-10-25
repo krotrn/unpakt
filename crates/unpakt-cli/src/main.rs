@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
+use output::clean_lines;
 use tracing_subscriber::EnvFilter;
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
@@ -354,7 +355,7 @@ fn update_apps(
     let mut refused = false;
     for app in engine.list()? {
         if let Some((_, e)) = check.failed.iter().find(|(f, _)| *f == app.id) {
-            eprintln!("{}: check failed: {e}", app.id);
+            eprintln!("{}: check failed: {}", app.id, clean_lines(&e.to_string()));
             failed += 1;
             continue;
         }
@@ -412,14 +413,14 @@ fn note_update_failure(id: &str, e: Error, failed: &mut usize) -> Result<()> {
     if matches!(e, Error::Interrupted) {
         return Err(e.into());
     }
-    eprintln!("error: {id}: {e:#}");
+    eprintln!("error: {id}: {}", clean_lines(&format!("{e:#}")));
     *failed += 1;
     Ok(())
 }
 
 fn report_failed_checks(failed: &[(String, Error)]) -> Result<()> {
     for (id, e) in failed {
-        eprintln!("{id}: check failed: {e}");
+        eprintln!("{id}: check failed: {}", clean_lines(&e.to_string()));
     }
     if failed.is_empty() {
         Ok(())
@@ -460,9 +461,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if err.is::<NeedsConfirmation>() {
-                eprintln!("{err}");
+                eprintln!("{}", clean_lines(&err.to_string()));
             } else {
-                eprintln!("error: {err:#}");
+                eprintln!("error: {}", clean_lines(&format!("{err:#}")));
             }
             ExitCode::from(exit_code(&err))
         }

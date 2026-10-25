@@ -21,7 +21,6 @@ pub enum DataSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum StreamKind {
     Dir,
     File,
@@ -29,7 +28,6 @@ pub(crate) enum StreamKind {
     HardLink(PathBuf),
 }
 
-#[allow(dead_code)]
 pub(crate) struct StreamEntry<'a> {
     /// Normalised, relative and never empty.
     pub path: PathBuf,
@@ -57,7 +55,6 @@ pub(crate) fn normalize(raw: &Path) -> Result<PathBuf> {
 /// Calls `f` for every directory, file, symlink and hard link in the payload.
 /// Device nodes, fifos and extended headers are skipped, and so are entries
 /// whose path normalises to nothing.
-#[allow(dead_code)]
 pub(crate) fn for_each_entry(
     src: &DataSource,
     mut f: impl FnMut(StreamEntry<'_>) -> Result<()>,

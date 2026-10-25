@@ -135,6 +135,138 @@ pub fn build_tarball(dir: &Path, name: &str, comp: Comp, entries: &[E]) -> PathB
     path
 }
 
+/// Writes an `ar` archive named `name` under `dir` holding `members` in order.
+pub fn build_ar(dir: &Path, name: &str, members: &[(&str, Vec<u8>)]) -> PathBuf {
+    let path = dir.join(name);
+    let mut builder = ar::Builder::new(std::fs::File::create(&path).unwrap());
+    for (member, data) in members {
+        builder
+            .append(
+                &ar::Header::new(member.as_bytes().to_vec(), data.len() as u64),
+                &data[..],
+            )
+            .unwrap();
+    }
+    path
+}
+
+fn gz(bytes: Vec<u8>) -> Vec<u8> {
+    let mut w = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    w.write_all(&bytes).unwrap();
+    w.finish().unwrap()
+}
+
+/// A tar whose paths carry a `./` prefix after a leading `./` directory entry.
+fn dotted_tar(entries: &[E]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut dir = tar::Header::new_gnu();
+    dir.set_entry_type(tar::EntryType::Directory);
+    dir.set_mode(0o755);
+    dir.set_size(0);
+    builder.append_data(&mut dir, "./", &b""[..]).unwrap();
+    for entry in entries {
+        let mut header = tar::Header::new_gnu();
+        match entry {
+            E::File(path, data, mode) => {
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_mode(*mode);
+                header.set_size(data.len() as u64);
+                builder
+                    .append_data(&mut header, format!("./{path}"), *data)
+                    .unwrap();
+            }
+            E::Link(path, target) | E::Hard(path, target) => {
+                let hard = matches!(entry, E::Hard(..));
+                header.set_entry_type(if hard {
+                    tar::EntryType::Link
+                } else {
+                    tar::EntryType::Symlink
+                });
+                header.set_mode(0o777);
+                header.set_size(0);
+                builder
+                    .append_link(&mut header, format!("./{path}"), target)
+                    .unwrap();
+            }
+        }
+    }
+    builder.into_inner().unwrap()
+}
+
+/// Writes a deb named `name` under `dir`: `debian-binary`, `control.tar.gz`
+/// (the `control` text plus `scripts`) and `data.tar.gz`.
+pub fn build_deb(
+    dir: &Path,
+    name: &str,
+    control: &str,
+    scripts: &[(&str, &[u8])],
+    data: &[E],
+) -> PathBuf {
+    let mut control_entries = vec![E::File("control", control.as_bytes(), 0o644)];
+    for (script, text) in scripts {
+        control_entries.push(E::File(script, text, 0o755));
+    }
+    build_ar(
+        dir,
+        name,
+        &[
+            ("debian-binary", b"2.0\n".to_vec()),
+            ("control.tar.gz", gz(dotted_tar(&control_entries))),
+            ("data.tar.gz", gz(dotted_tar(data))),
+        ],
+    )
+}
+
+/// The package architecture string that matches this machine.
+pub fn host_package_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => "all",
+    }
+}
+
+/// An Electron-style app packaged as `format`: a launcher link, a setuid
+/// helper, a desktop file, an icon and a postinst script. Version `1.2.3`.
+pub fn electron_like(dir: &Path, format: unpakt_core::model::FormatKind) -> PathBuf {
+    electron_like_with(dir, format, "")
+}
+
+/// Like [`electron_like`], with `extra_control` appended to the control fields.
+pub fn electron_like_with(
+    dir: &Path,
+    format: unpakt_core::model::FormatKind,
+    extra_control: &str,
+) -> PathBuf {
+    let elf = build_elf(&["libc.so.6"], None, &[], &[]);
+    let desktop = b"[Desktop Entry]\nType=Application\nName=Foo\nExec=/usr/bin/foo %U\nIcon=foo\n";
+    let png = b"\x89PNG\r\n\x1a\nfake";
+    let data = [
+        E::File("opt/Foo/foo", &elf, 0o755),
+        E::File("opt/Foo/chrome-sandbox", b"sandbox", 0o4755),
+        E::Link("usr/bin/foo", "/opt/Foo/foo"),
+        E::File("usr/share/applications/foo.desktop", desktop, 0o644),
+        E::File("usr/share/icons/hicolor/256x256/apps/foo.png", png, 0o644),
+    ];
+    let postinst: &[u8] = b"#!/bin/sh\nset -e\nupdate-desktop-database -q || true\n";
+    match format {
+        unpakt_core::model::FormatKind::Deb => {
+            let control = format!(
+                "Package: foo\nVersion: 1.2.3\nArchitecture: {}\nMaintainer: t <t@example.org>\n{extra_control}",
+                host_package_arch()
+            );
+            build_deb(
+                dir,
+                "foo_1.2.3_pkg.deb",
+                &control,
+                &[("postinst", postinst)],
+                &data,
+            )
+        }
+        other => unimplemented!("electron_like for {other:?}"),
+    }
+}
+
 /// A shell script that creates `marker` when run.
 pub fn marker_script(marker: &Path) -> Vec<u8> {
     format!("#!/bin/sh\ntouch '{}'\n", marker.display()).into_bytes()

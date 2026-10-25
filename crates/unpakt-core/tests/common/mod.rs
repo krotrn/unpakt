@@ -69,6 +69,7 @@ pub enum Comp {
     None,
 }
 
+#[derive(Clone)]
 pub enum E<'a> {
     /// Path, contents, mode.
     File(&'a str, &'a [u8], u32),

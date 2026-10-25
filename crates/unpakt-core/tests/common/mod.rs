@@ -226,13 +226,165 @@ pub fn host_package_arch() -> &'static str {
     }
 }
 
+/// The rpm architecture string that matches this machine.
+pub fn host_rpm_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        _ => "noarch",
+    }
+}
+
+pub struct RpmTags<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub release: &'a str,
+    pub arch: &'a str,
+    pub post: Option<&'a str>,
+    pub requires: &'a [&'a str],
+    pub source: bool,
+}
+
+fn rpm_header(tags: &[(u32, u32, Vec<u8>, u32)], signature: bool) -> Vec<u8> {
+    let mut index = Vec::new();
+    let mut store = Vec::new();
+    for (tag, kind, bytes, count) in tags {
+        index.extend_from_slice(&tag.to_be_bytes());
+        index.extend_from_slice(&kind.to_be_bytes());
+        index.extend_from_slice(&(store.len() as u32).to_be_bytes());
+        index.extend_from_slice(&count.to_be_bytes());
+        store.extend_from_slice(bytes);
+    }
+    let mut out = vec![0x8e, 0xad, 0xe8, 0x01, 0, 0, 0, 0];
+    out.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(store.len() as u32).to_be_bytes());
+    out.extend(index);
+    out.extend(store);
+    while signature && out.len() % 8 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+/// A `newc` archive with `./`-prefixed paths. Hard links are written ahead of
+/// the record that carries their data, the way rpm lays them out.
+fn rpm_cpio(entries: &[E]) -> Vec<u8> {
+    fn record(ino: u32, mode: u32, nlink: u32, name: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "070701{ino:08X}{mode:08X}{:08X}{:08X}{nlink:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}{:08X}",
+            0, 0, 0, data.len(), 0, 0, 0, 0, name.len() + 1, 0
+        )
+        .into_bytes();
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out.extend_from_slice(data);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        out
+    }
+    let mut out = Vec::new();
+    let mut ino = 0;
+    for entry in entries {
+        ino += 1;
+        match entry {
+            E::File(path, data, mode) => {
+                let links: Vec<&str> = entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        E::Hard(p, t) if t == path => Some(*p),
+                        _ => None,
+                    })
+                    .collect();
+                let nlink = 1 + links.len() as u32;
+                for link in links {
+                    out.extend(record(
+                        ino,
+                        0o100000 | mode,
+                        nlink,
+                        &format!("./{link}"),
+                        b"",
+                    ));
+                }
+                out.extend(record(
+                    ino,
+                    0o100000 | mode,
+                    nlink,
+                    &format!("./{path}"),
+                    data,
+                ));
+            }
+            E::Link(path, target) => {
+                out.extend(record(
+                    ino,
+                    0o120777,
+                    1,
+                    &format!("./{path}"),
+                    target.as_bytes(),
+                ));
+            }
+            E::Hard(..) => {}
+        }
+    }
+    out.extend(record(0, 0, 1, "TRAILER!!!", b""));
+    out
+}
+
+/// Writes an rpm named `name` under `dir`: lead, an empty signature header,
+/// the main header and a gzip cpio payload.
+pub fn build_rpm(dir: &Path, name: &str, t: RpmTags, data: &[E]) -> PathBuf {
+    let string = |tag: u32, v: &str| (tag, 6, [v.as_bytes(), &[0]].concat(), 1);
+    let mut tags = vec![
+        string(1000, t.name),
+        string(1001, t.version),
+        string(1002, t.release),
+        string(1022, t.arch),
+    ];
+    if let Some(post) = t.post {
+        tags.push(string(1024, post));
+    }
+    if !t.source {
+        tags.push(string(1044, "foo-1.2.3-1.src.rpm"));
+    }
+    let requires: Vec<u8> = t
+        .requires
+        .iter()
+        .flat_map(|r| r.bytes().chain([0]))
+        .collect();
+    if !t.requires.is_empty() {
+        tags.push((1049, 8, requires, t.requires.len() as u32));
+    }
+    let mut lead = vec![
+        0xed,
+        0xab,
+        0xee,
+        0xdb,
+        3,
+        0,
+        0,
+        if t.source { 1 } else { 0 },
+    ];
+    lead.resize(96, 0);
+    let mut bytes = lead;
+    bytes.extend(rpm_header(&[], true));
+    bytes.extend(rpm_header(&tags, false));
+    bytes.extend(gz(rpm_cpio(data)));
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
 /// An Electron-style app packaged as `format`: a launcher link, a setuid
 /// helper, a desktop file, an icon and a postinst script. Version `1.2.3`.
 pub fn electron_like(dir: &Path, format: unpakt_core::model::FormatKind) -> PathBuf {
     electron_like_with(dir, format, "")
 }
 
-/// Like [`electron_like`], with `extra_control` appended to the control fields.
+/// Like [`electron_like`], with `extra_control` appended to the control fields
+/// (for an rpm, one required name per line).
 pub fn electron_like_with(
     dir: &Path,
     format: unpakt_core::model::FormatKind,
@@ -260,6 +412,23 @@ pub fn electron_like_with(
                 "foo_1.2.3_pkg.deb",
                 &control,
                 &[("postinst", postinst)],
+                &data,
+            )
+        }
+        unpakt_core::model::FormatKind::Rpm => {
+            let requires: Vec<&str> = extra_control.lines().collect();
+            build_rpm(
+                dir,
+                "foo-1.2.3-1.pkg.rpm",
+                RpmTags {
+                    name: "foo",
+                    version: "1.2.3",
+                    release: "1",
+                    arch: host_rpm_arch(),
+                    post: Some(std::str::from_utf8(postinst).unwrap()),
+                    requires: &requires,
+                    source: false,
+                },
                 &data,
             )
         }

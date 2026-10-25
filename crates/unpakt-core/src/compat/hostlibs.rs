@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 
 use goblin::elf::Elf;
 
+use crate::model::Arch;
+
 const NEW_MAGIC: &[u8] = b"glibc-ld.so.cache1.1";
 const OLD_MAGIC: &[u8] = b"ld.so-1.7.0";
 const NEW_HEADER_LEN: usize = 48;
 const NEW_ENTRY_LEN: usize = 24;
+const FLAG_ELF_LIBC6: u32 = 0x0003;
 const MAX_LIB_BYTES: u64 = 64 * 1024 * 1024;
 
 const FALLBACK_DIRS: [&str; 8] = [
@@ -35,7 +38,7 @@ impl HostLibs {
     pub fn probe() -> HostLibs {
         let sonames = std::fs::read("/etc/ld.so.cache")
             .ok()
-            .and_then(|bytes| parse_ld_so_cache(&bytes))
+            .and_then(|bytes| parse_ld_so_cache(&bytes, &Arch::current()))
             .unwrap_or_else(list_fallback_dirs);
         HostLibs {
             sonames,
@@ -109,7 +112,7 @@ fn list_fallback_dirs() -> BTreeMap<String, PathBuf> {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name.starts_with("lib") && name.contains(".so") {
+            if (name.starts_with("lib") || name.starts_with("ld-linux")) && name.contains(".so") {
                 map.entry(name.to_string()).or_insert_with(|| entry.path());
             }
         }
@@ -147,8 +150,10 @@ fn cstr_at(bytes: &[u8], off: usize) -> Option<&str> {
 }
 
 /// Reads the `glibc-ld.so.cache1.1` format, at the start of `bytes` or after
-/// an old-format block. Maps each soname to the path the loader would use.
-pub(crate) fn parse_ld_so_cache(bytes: &[u8]) -> Option<BTreeMap<String, PathBuf>> {
+/// an old-format block. Maps each soname to the path the loader would use for
+/// `arch`: entries for other architectures are skipped, and entries carrying no
+/// architecture bits are used only when nothing matches the architecture.
+pub(crate) fn parse_ld_so_cache(bytes: &[u8], arch: &Arch) -> Option<BTreeMap<String, PathBuf>> {
     let base = find_new_header(bytes)?;
     let header = bytes.get(base..)?;
     let nlibs = u32_at(header, 20)? as usize;
@@ -157,18 +162,40 @@ pub(crate) fn parse_ld_so_cache(bytes: &[u8]) -> Option<BTreeMap<String, PathBuf
     if entries_end > header.len() {
         return None;
     }
-    let mut map = BTreeMap::new();
+    let want = arch_bits(arch);
+    let mut best: BTreeMap<String, (u8, PathBuf)> = BTreeMap::new();
     for i in 0..nlibs {
         let at = NEW_HEADER_LEN + i * NEW_ENTRY_LEN;
+        let flags = u32_at(header, at)?;
+        if flags & 0xff != FLAG_ELF_LIBC6 {
+            continue;
+        }
+        let rank = match flags & 0xff00 {
+            0 => 1,
+            bits if Some(bits) == want => 0,
+            _ => continue,
+        };
         let key = u32_at(header, at + 4)? as usize;
         let value = u32_at(header, at + 8)? as usize;
         let (Some(name), Some(path)) = (cstr_at(header, key), cstr_at(header, value)) else {
             continue;
         };
-        map.entry(name.to_string())
-            .or_insert_with(|| PathBuf::from(path));
+        match best.get(name) {
+            Some((have, _)) if *have <= rank => {}
+            _ => {
+                best.insert(name.to_string(), (rank, PathBuf::from(path)));
+            }
+        }
     }
-    Some(map)
+    Some(best.into_iter().map(|(k, (_, v))| (k, v)).collect())
+}
+
+fn arch_bits(arch: &Arch) -> Option<u32> {
+    match arch {
+        Arch::X86_64 => Some(0x0300),
+        Arch::Aarch64 => Some(0x0a00),
+        Arch::Other(_) => None,
+    }
 }
 
 fn find_new_header(bytes: &[u8]) -> Option<usize> {
@@ -194,27 +221,34 @@ fn find_new_header(bytes: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn build_cache(old_block: bool) -> Vec<u8> {
-        let strings: &[u8] =
-            b"libfoo.so.1\0/usr/lib/libfoo.so.1\0libbar.so.2\0/usr/lib/libbar.so.2\0";
-        let nlibs = 2u32;
-        let strings_start = (NEW_HEADER_LEN + 2 * NEW_ENTRY_LEN) as u32;
+    fn build_entries(old_block: bool, entries: &[(u32, &str, &str)]) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let mut offs = Vec::new();
+        for (_, name, path) in entries {
+            let k = strings.len() as u32;
+            strings.extend_from_slice(name.as_bytes());
+            strings.push(0);
+            let v = strings.len() as u32;
+            strings.extend_from_slice(path.as_bytes());
+            strings.push(0);
+            offs.push((k, v));
+        }
+        let strings_start = (NEW_HEADER_LEN + entries.len() * NEW_ENTRY_LEN) as u32;
         let mut new = Vec::new();
         new.extend_from_slice(NEW_MAGIC);
-        new.extend_from_slice(&nlibs.to_le_bytes());
+        new.extend_from_slice(&(entries.len() as u32).to_le_bytes());
         new.extend_from_slice(&(strings.len() as u32).to_le_bytes());
         new.extend_from_slice(&[0u8; 4]);
         new.extend_from_slice(&[0u8; 16]);
         assert_eq!(new.len(), NEW_HEADER_LEN);
-        let offs = [(0u32, 12u32), (33, 46)];
-        for (k, v) in offs {
-            new.extend_from_slice(&1i32.to_le_bytes());
+        for ((flags, _, _), (k, v)) in entries.iter().zip(offs) {
+            new.extend_from_slice(&flags.to_le_bytes());
             new.extend_from_slice(&(strings_start + k).to_le_bytes());
             new.extend_from_slice(&(strings_start + v).to_le_bytes());
             new.extend_from_slice(&0u32.to_le_bytes());
             new.extend_from_slice(&0u64.to_le_bytes());
         }
-        new.extend_from_slice(strings);
+        new.extend_from_slice(&strings);
         if !old_block {
             return new;
         }
@@ -230,10 +264,39 @@ mod tests {
         out
     }
 
+    fn build_cache(old_block: bool) -> Vec<u8> {
+        build_entries(
+            old_block,
+            &[
+                (0x0303, "libfoo.so.1", "/usr/lib/libfoo.so.1"),
+                (0x0303, "libbar.so.2", "/usr/lib/libbar.so.2"),
+            ],
+        )
+    }
+
+    #[test]
+    fn picks_host_arch_entry_in_either_order() {
+        let i386 = (0x0003, "libx.so.1", "/usr/lib32/libx.so.1");
+        let x64 = (0x0303, "libx.so.1", "/usr/lib/libx.so.1");
+        for entries in [[i386, x64], [x64, i386]] {
+            let map = parse_ld_so_cache(&build_entries(false, &entries), &Arch::X86_64).unwrap();
+            assert_eq!(map["libx.so.1"], PathBuf::from("/usr/lib/libx.so.1"));
+        }
+    }
+
+    #[test]
+    fn other_arch_only_entry_is_absent() {
+        let bytes = build_entries(false, &[(0x0a03, "liby.so.1", "/usr/lib/liby.so.1")]);
+        let map = parse_ld_so_cache(&bytes, &Arch::X86_64).unwrap();
+        assert!(!map.contains_key("liby.so.1"));
+        let map = parse_ld_so_cache(&bytes, &Arch::Aarch64).unwrap();
+        assert!(map.contains_key("liby.so.1"));
+    }
+
     #[test]
     fn parses_ld_so_cache_new_format() {
         for old in [false, true] {
-            let map = parse_ld_so_cache(&build_cache(old)).expect("parsed");
+            let map = parse_ld_so_cache(&build_cache(old), &Arch::X86_64).expect("parsed");
             assert_eq!(
                 map.get("libfoo.so.1"),
                 Some(&PathBuf::from("/usr/lib/libfoo.so.1"))
@@ -247,20 +310,20 @@ mod tests {
         let Ok(bytes) = std::fs::read("/etc/ld.so.cache") else {
             return;
         };
-        let map = parse_ld_so_cache(&bytes).expect("real cache parses");
+        let map = parse_ld_so_cache(&bytes, &Arch::current()).expect("real cache parses");
         assert!(map.keys().any(|k| k.starts_with("libc.so")));
     }
 
     #[test]
     fn garbage_cache_is_none() {
-        assert!(parse_ld_so_cache(b"").is_none());
-        assert!(parse_ld_so_cache(b"not a cache at all, really").is_none());
+        assert!(parse_ld_so_cache(b"", &Arch::X86_64).is_none());
+        assert!(parse_ld_so_cache(b"not a cache at all, really", &Arch::X86_64).is_none());
         let mut truncated = build_cache(false);
         truncated.truncate(60);
-        assert!(parse_ld_so_cache(&truncated).is_none());
+        assert!(parse_ld_so_cache(&truncated, &Arch::X86_64).is_none());
         let mut lying = build_cache(false);
         lying[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(parse_ld_so_cache(&lying).is_none());
+        assert!(parse_ld_so_cache(&lying, &Arch::X86_64).is_none());
     }
 
     #[test]
@@ -283,7 +346,11 @@ mod tests {
     fn probe_reads_real_libc_versions() {
         let libs = HostLibs::probe();
         if libs.has("libc.so.6") {
-            assert_ne!(libs.provides("libc.so.6", "GLIBC_2.2.5"), Some(false));
+            let version = match Arch::current() {
+                Arch::Aarch64 => "GLIBC_2.17",
+                _ => "GLIBC_2.2.5",
+            };
+            assert_eq!(libs.provides("libc.so.6", version), Some(true));
         }
     }
 

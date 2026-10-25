@@ -169,6 +169,14 @@ mod tests {
     }
 
     #[test]
+    fn install_hint_escapes_single_quote() {
+        assert_eq!(
+            native_install_hint(PackageFamily::Deb, Path::new("/tmp/it's.deb")),
+            "sudo apt install '/tmp/it'\\''s.deb'"
+        );
+    }
+
+    #[test]
     fn parses_unquoted_id() {
         assert_eq!(
             parse_os_release("ID=arch\n"),

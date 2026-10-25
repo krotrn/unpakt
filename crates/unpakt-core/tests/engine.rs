@@ -658,3 +658,176 @@ fn engine_is_send() {
     fn send<T: Send>() {}
     send::<Engine>();
 }
+
+mod package_gate {
+    use super::common::{MockForge, deb_with_elf, electron_like};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use unpakt_core::compat::{HostLibs, Verdict};
+    use unpakt_core::engine::{AddOpts, Engine};
+    use unpakt_core::http::Http;
+    use unpakt_core::manifest::Manifest;
+    use unpakt_core::model::{Arch, FormatKind};
+    use unpakt_core::{Error, Layout, host::Host};
+
+    fn libs() -> HostLibs {
+        HostLibs::from_parts(
+            BTreeMap::from([("libc.so.6".to_string(), PathBuf::from("/lib/libc.so.6"))]),
+            BTreeMap::from([(
+                "libc.so.6".to_string(),
+                BTreeSet::from(["GLIBC_2.34".to_string()]),
+            )]),
+            true,
+        )
+    }
+
+    fn engine_on(root: &Path, host: Host, forge: Option<&MockForge>) -> Engine {
+        let layout = Layout::under(root);
+        let bin = OsString::from(layout.bin.clone());
+        let engine = Engine::new(layout, host)
+            .unwrap()
+            .with_path_var(bin)
+            .with_host_libs(libs());
+        match forge {
+            Some(f) => engine.with_http(Http::new(&f.api_url(), None).unwrap()),
+            None => engine,
+        }
+    }
+
+    fn engine(root: &Path) -> Engine {
+        engine_on(root, Host::detect(), None)
+    }
+
+    fn option(root: &Path, id: &str, key: &str) -> Option<String> {
+        Manifest::open(&Layout::under(root).db)
+            .unwrap()
+            .option(id, key)
+            .unwrap()
+    }
+
+    fn missing_lib_deb(dir: &Path) -> PathBuf {
+        deb_with_elf(dir, "1.0.0", &["libnotthere.so.9"], &[], false).1
+    }
+
+    #[test]
+    fn risky_package_refused_without_override() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path());
+        let deb = missing_lib_deb(src.path());
+        let plan = engine
+            .inspect(deb.to_str().unwrap(), AddOpts::default())
+            .unwrap();
+        assert!(matches!(plan.compat, Some(Verdict::Risky(_))));
+        match engine.install(plan) {
+            Err(Error::Refused(m)) => assert!(m.contains("libnotthere.so.9"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(engine.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn risky_package_installs_with_override() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path());
+        let deb = missing_lib_deb(src.path());
+        let opts = AddOpts {
+            allow_risky: true,
+            ..AddOpts::default()
+        };
+        let plan = engine.inspect(deb.to_str().unwrap(), opts).unwrap();
+        let id = engine.install(plan).unwrap().id;
+        assert_eq!(
+            option(root.path(), &id, "compat.accepted").as_deref(),
+            Some("missing-library")
+        );
+    }
+
+    #[test]
+    fn needs_container_has_no_override() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path());
+        let deb = deb_with_elf(
+            src.path(),
+            "1.0.0",
+            &["libc.so.6"],
+            &[("libc.so.6", "GLIBC_9.99")],
+            false,
+        )
+        .1;
+        let opts = AddOpts {
+            allow_risky: true,
+            ..AddOpts::default()
+        };
+        let plan = engine.inspect(deb.to_str().unwrap(), opts).unwrap();
+        assert!(matches!(plan.compat, Some(Verdict::NeedsContainer(_))));
+        assert!(matches!(engine.install(plan), Err(Error::Refused(_))));
+        assert!(engine.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_family_plan_carries_native_hint() {
+        let src = tempfile::tempdir().unwrap();
+        let deb = electron_like(src.path(), FormatKind::Deb);
+        let host = |os: &str| Host {
+            arch: Arch::current(),
+            os_id: Some(os.to_string()),
+            os_like: vec![],
+            immutable_root: false,
+            fuse2: true,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let ubuntu = engine_on(root.path(), host("ubuntu"), None)
+            .inspect(deb.to_str().unwrap(), AddOpts::default())
+            .unwrap();
+        assert!(ubuntu.native_hint.unwrap().starts_with("sudo apt install"),);
+        let root = tempfile::tempdir().unwrap();
+        let arch = engine_on(root.path(), host("arch"), None)
+            .inspect(deb.to_str().unwrap(), AddOpts::default())
+            .unwrap();
+        assert_eq!(arch.native_hint, None);
+    }
+
+    #[test]
+    fn format_option_stored() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path());
+        let deb = electron_like(src.path(), FormatKind::Deb);
+        let opts = AddOpts {
+            format: Some(FormatKind::Deb),
+            ..AddOpts::default()
+        };
+        let plan = engine.inspect(deb.to_str().unwrap(), opts).unwrap();
+        let id = engine.install(plan).unwrap().id;
+        assert_eq!(option(root.path(), &id, "format").as_deref(), Some("deb"));
+    }
+
+    #[test]
+    fn blocked_message_names_alternative() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let engine = engine_on(root.path(), Host::detect(), Some(&forge));
+        let (name, path) = deb_with_elf(src.path(), "1.0.0", &["libnotthere.so.9"], &[], false);
+        forge.publish(
+            "1.0.0",
+            vec![
+                (name, std::fs::read(path).unwrap()),
+                ("foo-1.0.AppImage".to_string(), b"x".to_vec()),
+            ],
+        );
+        let opts = AddOpts {
+            format: Some(FormatKind::Deb),
+            ..AddOpts::default()
+        };
+        let plan = engine.inspect("https://github.com/o/r", opts).unwrap();
+        let m = plan.blocked().unwrap();
+        assert!(m.contains("foo-1.0.AppImage"), "{m}");
+        assert!(m.contains("--format appimage"), "{m}");
+        engine.discard(plan);
+    }
+}

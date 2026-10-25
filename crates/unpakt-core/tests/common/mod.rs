@@ -925,3 +925,31 @@ pub fn build_elf(
     );
     out
 }
+
+/// A deb of package `foo` at `version` for this machine, whose launcher
+/// `opt/Foo/foo` is an ELF needing `needed` and `version_needs`; `unit` adds a
+/// systemd system unit.
+pub fn deb_with_elf(
+    dir: &Path,
+    version: &str,
+    needed: &[&str],
+    version_needs: &[(&str, &str)],
+    unit: bool,
+) -> (String, PathBuf) {
+    let name = format!("foo_{version}_{}.deb", host_package_arch());
+    let elf = build_elf(needed, None, version_needs, &[]);
+    let control = format!(
+        "Package: foo\nVersion: {version}\nArchitecture: {}\nMaintainer: t <t@example.org>\n",
+        host_package_arch()
+    );
+    let mut data = vec![E::File("opt/Foo/foo", &elf, 0o755)];
+    if unit {
+        data.push(E::File(
+            "usr/lib/systemd/system/foo.service",
+            b"[Service]\nExecStart=/opt/Foo/foo\n",
+            0o644,
+        ));
+    }
+    let path = build_deb(dir, &name, &control, &[], &data);
+    (name, path)
+}

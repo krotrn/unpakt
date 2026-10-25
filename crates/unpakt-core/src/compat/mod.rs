@@ -46,6 +46,15 @@ impl Verdict {
         self.findings().iter().map(|f| f.tag).collect()
     }
 
+    /// Tags of the findings that count against the verdict; notes are left out.
+    pub fn risk_tags(&self) -> BTreeSet<&'static str> {
+        self.findings()
+            .iter()
+            .filter(|f| !f.note)
+            .map(|f| f.tag)
+            .collect()
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Verdict::Ok(_) => "ok",

@@ -1,12 +1,25 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use crate::compat::elf::ElfFacts;
 use crate::error::Error;
+use crate::format::stream::DataSource;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatKind {
     AppImage,
     Tarball,
+    Deb,
+    Rpm,
+    Pacman,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageFamily {
+    Deb,
+    Rpm,
+    Pacman,
 }
 
 impl FormatKind {
@@ -14,6 +27,18 @@ impl FormatKind {
         match self {
             FormatKind::AppImage => "appimage",
             FormatKind::Tarball => "tarball",
+            FormatKind::Deb => "deb",
+            FormatKind::Rpm => "rpm",
+            FormatKind::Pacman => "pacman",
+        }
+    }
+
+    pub fn family(self) -> Option<PackageFamily> {
+        match self {
+            FormatKind::Deb => Some(PackageFamily::Deb),
+            FormatKind::Rpm => Some(PackageFamily::Rpm),
+            FormatKind::Pacman => Some(PackageFamily::Pacman),
+            FormatKind::AppImage | FormatKind::Tarball => None,
         }
     }
 }
@@ -24,6 +49,9 @@ impl FromStr for FormatKind {
         match s {
             "appimage" => Ok(FormatKind::AppImage),
             "tarball" => Ok(FormatKind::Tarball),
+            "deb" => Ok(FormatKind::Deb),
+            "rpm" => Ok(FormatKind::Rpm),
+            "pacman" => Ok(FormatKind::Pacman),
             other => Err(Error::Parse(format!("unknown format kind: {other}"))),
         }
     }
@@ -53,7 +81,19 @@ impl Arch {
             Arch::Other(_) => &[],
         }
     }
+
+    /// Spellings that package metadata uses for this architecture.
+    pub fn package_aliases(&self) -> &[&str] {
+        match self {
+            Arch::X86_64 => &["amd64", "x86_64"],
+            Arch::Aarch64 => &["arm64", "aarch64"],
+            Arch::Other(_) => &[],
+        }
+    }
 }
+
+/// Architecture values that mean a package runs on any machine.
+pub const NEUTRAL_ARCHES: [&str; 3] = ["all", "noarch", "any"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecKind {
@@ -113,6 +153,40 @@ pub struct Payload {
     pub desktop: Option<String>,
     pub icon: Option<Icon>,
     pub warnings: Vec<String>,
+    /// Set only for deb, rpm and pacman payloads.
+    pub package: Option<PackageMeta>,
+}
+
+/// A maintainer or install script, read as text and never run.
+#[derive(Debug, Clone)]
+pub struct Script {
+    pub name: String,
+    pub text: String,
+}
+
+/// What a package's payload contains. Keys are relative and normalized (no
+/// leading `/` or `./`); link targets are stored as written.
+#[derive(Debug, Clone, Default)]
+pub struct PayloadIndex {
+    pub files: BTreeSet<PathBuf>,
+    pub dirs: BTreeSet<PathBuf>,
+    pub links: BTreeMap<PathBuf, PathBuf>,
+    pub setuid: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageMeta {
+    pub family: PackageFamily,
+    pub name: String,
+    pub version: String,
+    pub arch: String,
+    pub depends: Vec<String>,
+    pub scripts: Vec<Script>,
+    pub index: PayloadIndex,
+    pub elf: BTreeMap<PathBuf, ElfFacts>,
+    /// Text of the chosen entry when it is a `#!` file of at most 256 KiB.
+    pub entry_script: Option<String>,
+    pub data: DataSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,7 +245,13 @@ mod tests {
 
     #[test]
     fn kinds_round_trip_through_str() {
-        for k in [FormatKind::AppImage, FormatKind::Tarball] {
+        for k in [
+            FormatKind::AppImage,
+            FormatKind::Tarball,
+            FormatKind::Deb,
+            FormatKind::Rpm,
+            FormatKind::Pacman,
+        ] {
             assert_eq!(k.as_str().parse::<FormatKind>().unwrap(), k);
         }
         for k in [ExecKind::Elf, ExecKind::Script] {
@@ -192,5 +272,22 @@ mod tests {
         assert_eq!(Arch::X86_64.aliases(), &["x86_64", "amd64", "x64"]);
         assert_eq!(Arch::Aarch64.aliases(), &["aarch64", "arm64"]);
         assert!(Arch::Other("riscv64".into()).aliases().is_empty());
+    }
+
+    #[test]
+    fn package_families() {
+        assert_eq!(FormatKind::Deb.family(), Some(PackageFamily::Deb));
+        assert_eq!(FormatKind::Rpm.family(), Some(PackageFamily::Rpm));
+        assert_eq!(FormatKind::Pacman.family(), Some(PackageFamily::Pacman));
+        assert_eq!(FormatKind::Tarball.family(), None);
+        assert_eq!(FormatKind::AppImage.family(), None);
+    }
+
+    #[test]
+    fn arch_package_aliases() {
+        assert_eq!(Arch::X86_64.package_aliases(), &["amd64", "x86_64"]);
+        assert_eq!(Arch::Aarch64.package_aliases(), &["arm64", "aarch64"]);
+        assert!(Arch::Other("riscv64".into()).package_aliases().is_empty());
+        assert_eq!(NEUTRAL_ARCHES, ["all", "noarch", "any"]);
     }
 }

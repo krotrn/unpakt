@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod cancel;
+pub mod compat;
 pub mod desktop;
 pub mod engine;
 pub mod error;

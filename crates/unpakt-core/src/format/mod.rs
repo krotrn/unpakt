@@ -9,6 +9,7 @@ use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Artifact, FormatKind, Payload};
 
 pub mod appimage;
+pub mod stream;
 pub mod tarball;
 
 pub use appimage::squashfs_offset;

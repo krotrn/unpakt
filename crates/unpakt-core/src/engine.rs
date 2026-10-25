@@ -182,7 +182,7 @@ fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) 
             .as_deref()
             .and_then(|text| DesktopEntry::parse(text).ok())
             .and_then(|d| d.get("Exec").and_then(exec_argv0)),
-        FormatKind::Tarball => entry
+        FormatKind::Tarball | FormatKind::Deb | FormatKind::Rpm | FormatKind::Pacman => entry
             .and_then(|e| e.path.file_name())
             .map(|n| n.to_string_lossy().into_owned()),
     };

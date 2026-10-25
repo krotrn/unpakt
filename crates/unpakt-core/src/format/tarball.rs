@@ -151,6 +151,7 @@ impl FormatPlugin for Tarball {
             desktop,
             icon,
             warnings,
+            package: None,
         })
     }
 }

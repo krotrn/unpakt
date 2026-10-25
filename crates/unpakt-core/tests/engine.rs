@@ -830,4 +830,123 @@ mod package_gate {
         assert!(m.contains("--format appimage"), "{m}");
         engine.discard(plan);
     }
+
+    #[test]
+    fn downloaded_package_hint_names_the_asset_not_the_cache() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let host = Host {
+            arch: Arch::current(),
+            os_id: Some("ubuntu".to_string()),
+            os_like: vec![],
+            immutable_root: false,
+            fuse2: true,
+        };
+        let engine = engine_on(root.path(), host, Some(&forge));
+        let (name, path) = deb_with_elf(src.path(), "1.0.0", &["libnotthere.so.9"], &[], false);
+        forge.publish("1.0.0", vec![(name.clone(), std::fs::read(path).unwrap())]);
+        let plan = engine
+            .inspect("https://github.com/o/r", AddOpts::default())
+            .unwrap();
+        let hint = plan.native_hint.clone().unwrap();
+        assert!(hint.contains(&name), "{hint}");
+        assert!(hint.contains("sudo apt install ./"), "{hint}");
+        assert!(!hint.contains("/.cache/"), "{hint}");
+        engine.discard(plan);
+    }
+
+    #[test]
+    fn up_to_date_app_ignores_a_changed_host() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (name, path) = deb_with_elf(
+            src.path(),
+            "1.0.0",
+            &["libnotthere.so.9", "libc.so.6"],
+            &[("libc.so.6", "GLIBC_9.99")],
+            false,
+        );
+        forge.publish("1.0.0", vec![(name, std::fs::read(path).unwrap())]);
+        let newer_libc = HostLibs::from_parts(
+            BTreeMap::from([("libc.so.6".to_string(), PathBuf::from("/lib/libc.so.6"))]),
+            BTreeMap::from([(
+                "libc.so.6".to_string(),
+                BTreeSet::from(["GLIBC_2.34".to_string(), "GLIBC_9.99".to_string()]),
+            )]),
+            true,
+        );
+        let layout = Layout::under(root.path());
+        let mut first = Engine::new(layout.clone(), Host::detect())
+            .unwrap()
+            .with_path_var(OsString::from(layout.bin.clone()))
+            .with_host_libs(newer_libc)
+            .with_http(Http::new(&forge.api_url(), None).unwrap());
+        let opts = AddOpts {
+            allow_risky: true,
+            ..AddOpts::default()
+        };
+        let plan = first.inspect("https://github.com/o/r", opts).unwrap();
+        assert!(matches!(plan.compat, Some(Verdict::Risky(_))));
+        let id = first.install(plan).unwrap().id;
+
+        let mut second = engine_on(root.path(), Host::detect(), Some(&forge));
+        assert_eq!(second.update(&id).unwrap(), None);
+    }
+
+    #[test]
+    fn format_option_must_match_the_package() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let engine = engine(root.path());
+        let pkg = super::common::build_pacman(
+            src.path(),
+            "foo-1.0.tar.zst",
+            &format!(
+                "pkgname = foo\npkgver = 1.0-1\narch = {}\n",
+                super::common::host_rpm_arch()
+            ),
+            None,
+            &[super::common::E::File("opt/foo/foo", b"#!/bin/sh\n", 0o755)],
+            super::common::Comp::Zst,
+        );
+        let opts = AddOpts {
+            format: Some(FormatKind::Tarball),
+            ..AddOpts::default()
+        };
+        let r = engine.inspect(pkg.to_str().unwrap(), opts);
+        assert!(
+            matches!(&r, Err(Error::Refused(m)) if m.contains("pacman")),
+            "{:?}",
+            r.map(|_| ())
+        );
+    }
+
+    #[test]
+    fn command_is_the_bin_link_name() {
+        use super::common::{E, build_deb, build_elf, host_package_arch};
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let engine = engine(root.path());
+        let elf = build_elf(&["libc.so.6"], None, &[], &[]);
+        let control = format!(
+            "Package: discord\nVersion: 1.0\nArchitecture: {}\nMaintainer: t <t@example.org>\n",
+            host_package_arch()
+        );
+        let deb = build_deb(
+            src.path(),
+            "discord_1.0_pkg.deb",
+            &control,
+            &[],
+            &[
+                E::File("usr/share/discord/Discord", &elf, 0o755),
+                E::Link("usr/bin/discord", "/usr/share/discord/Discord"),
+            ],
+        );
+        let plan = engine
+            .inspect(deb.to_str().unwrap(), AddOpts::default())
+            .unwrap();
+        assert_eq!(plan.command.as_deref(), Some("discord"));
+    }
 }

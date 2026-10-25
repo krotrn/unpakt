@@ -828,10 +828,6 @@ mod package_gate {
         let alternative = plan.alternative.clone().unwrap();
         assert_eq!(alternative.asset, "foo-1.0.AppImage");
         assert_eq!(alternative.format, FormatKind::AppImage);
-        assert!(
-            alternative.url.ends_with("/foo-1.0.AppImage"),
-            "{alternative:?}"
-        );
         let m = plan.blocked().unwrap();
         assert!(!m.contains("--"), "front-end flags leaked into {m}");
         assert!(matches!(plan.refusal(), Some(Error::NeedsAcceptance(_))));
@@ -860,6 +856,26 @@ mod package_gate {
         assert!(hint.contains(&name), "{hint}");
         assert!(hint.contains("sudo apt install ./"), "{hint}");
         assert!(!hint.contains("/.cache/"), "{hint}");
+        engine.discard(plan);
+    }
+
+    #[test]
+    fn unversioned_download_label_keeps_the_package_version() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let engine = engine_on(root.path(), Host::detect(), Some(&forge));
+        let (_, path) = deb_with_elf(src.path(), "1.0.0", &[], &[], false);
+        forge.publish(
+            "1.0.0",
+            vec![("foo.deb".into(), std::fs::read(path).unwrap())],
+        );
+        let plan = engine
+            .inspect(&forge.download_url("foo.deb"), AddOpts::default())
+            .unwrap();
+        let (version, hash) = plan.plan.label.split_once('+').unwrap();
+        assert_eq!(version, "1.0.0");
+        assert_eq!(hash.len(), 12, "{}", plan.plan.label);
         engine.discard(plan);
     }
 

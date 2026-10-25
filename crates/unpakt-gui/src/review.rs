@@ -7,7 +7,7 @@ use relm4::gtk::{self, gdk, glib};
 use unpakt_core::engine::InstallPlan;
 
 use crate::app::{App, Msg};
-use crate::state::review_rows;
+use crate::state::{ReviewAction, compat_findings, review_action, review_rows};
 
 /// Builds the page. Only its two header buttons can leave it, so the plan is
 /// always either installed or discarded.
@@ -34,6 +34,33 @@ pub fn page(plan: &InstallPlan, sender: &ComponentSender<App>) -> adw::Navigatio
         list.append(&row);
     }
 
+    for (blocking, detail) in compat_findings(plan) {
+        let row = adw::ActionRow::new();
+        row.set_use_markup(false);
+        row.set_title(&detail);
+        row.set_title_lines(0);
+        row.add_css_class(if blocking { "error" } else { "warning" });
+        row.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+        list.append(&row);
+    }
+    let action = review_action(plan);
+    if let ReviewAction::Blocked(message) = &action {
+        let row = adw::ActionRow::new();
+        row.set_use_markup(false);
+        row.set_title(message);
+        row.set_title_lines(0);
+        row.add_css_class("error");
+        list.append(&row);
+    }
+    if let Some(hint) = &plan.native_hint {
+        let row = adw::ActionRow::new();
+        row.set_use_markup(false);
+        row.set_title("Install system-wide yourself");
+        row.set_subtitle(hint);
+        row.set_subtitle_selectable(true);
+        list.append(&row);
+    }
+
     let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
@@ -56,15 +83,31 @@ pub fn page(plan: &InstallPlan, sender: &ComponentSender<App>) -> adw::Navigatio
         let sender = sender.clone();
         move |_| sender.input(Msg::CancelReview)
     });
-    let install = gtk::Button::with_label("Install");
-    install.add_css_class("suggested-action");
-    install.connect_clicked({
-        let sender = sender.clone();
-        move |_| sender.input(Msg::Confirm)
+    let install = match &action {
+        ReviewAction::Install => Some(("Install", "suggested-action", false)),
+        ReviewAction::InstallAnyway => Some(("Install anyway", "destructive-action", true)),
+        ReviewAction::Blocked(_) => None,
+    }
+    .map(|(label, class, risky)| {
+        let button = gtk::Button::with_label(label);
+        button.add_css_class(class);
+        button.connect_clicked({
+            let sender = sender.clone();
+            move |_| {
+                sender.input(if risky {
+                    Msg::ConfirmRisky
+                } else {
+                    Msg::Confirm
+                })
+            }
+        });
+        button
     });
     let header = adw::HeaderBar::new();
     header.pack_start(&cancel);
-    header.pack_end(&install);
+    if let Some(install) = &install {
+        header.pack_end(install);
+    }
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);

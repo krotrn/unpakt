@@ -13,7 +13,7 @@ use unpakt_core::manifest::AppRecord;
 
 use crate::apps::{self, BusyArea, Detail};
 use crate::review;
-use crate::state::{Busy, Effect, Model, app_rows, normalize_input};
+use crate::state::{Busy, Effect, Model, app_rows, compat_findings, normalize_input};
 use crate::worker::{Cmd, EngineWorker, Event, Op};
 
 #[derive(Debug)]
@@ -22,6 +22,8 @@ pub enum Msg {
     FileChosen(PathBuf),
     BrowseClicked,
     Confirm,
+    ConfirmRisky,
+    RiskyAccepted,
     CancelReview,
     CancelOp,
     InspectAgain,
@@ -250,6 +252,35 @@ impl SimpleComponent for App {
                     self.worker.emit(Cmd::Install { plan, cancel });
                     self.ui.nav.pop();
                 }
+            }
+            Msg::ConfirmRisky => {
+                if self.model.busy != Busy::Idle {
+                    return;
+                }
+                if let Some(plan) = &self.plan {
+                    let body = compat_findings(plan)
+                        .into_iter()
+                        .filter(|(blocking, _)| *blocking)
+                        .map(|(_, detail)| detail)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let dialog = adw::AlertDialog::new(Some("Install anyway?"), Some(&body));
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("install", "Install anyway");
+                    dialog.set_response_appearance("install", adw::ResponseAppearance::Destructive);
+                    dialog.set_close_response("cancel");
+                    let sender = sender.clone();
+                    dialog.connect_response(Some("install"), move |_, _| {
+                        sender.input(Msg::RiskyAccepted);
+                    });
+                    dialog.present(Some(&self.ui.window));
+                }
+            }
+            Msg::RiskyAccepted => {
+                if let Some(plan) = self.plan.as_mut() {
+                    plan.opts.allow_risky = true;
+                }
+                sender.input(Msg::Confirm);
             }
             Msg::CancelReview => {
                 self.discard_plan();

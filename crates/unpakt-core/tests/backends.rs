@@ -387,6 +387,40 @@ mod packages {
     }
 
     #[test]
+    fn package_links_through_directory_links_resolve() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let rpm = rpm_with(
+            src.path(),
+            &[
+                E::File("opt/foo/bin/tool", b"x", 0o755),
+                E::Link("usr/lib/foo", "/opt/foo"),
+                E::Link("usr/bin/tool", "/usr/lib/foo/bin/tool"),
+                E::Link("usr/share/foo", "/opt/foo/bin"),
+                E::Link("opt/foo/alias", "../foo/bin/tool"),
+            ],
+        );
+        let (_, done) = install(root.path(), rpm).unwrap();
+        let dir = &done.version_dir;
+        assert_eq!(
+            std::fs::read_link(dir.join("usr/bin/tool")).unwrap(),
+            PathBuf::from("../../opt/foo/bin/tool")
+        );
+        assert_eq!(
+            std::fs::read_link(dir.join("usr/lib/foo")).unwrap(),
+            PathBuf::from("../../opt/foo")
+        );
+        for p in [
+            "usr/bin/tool",
+            "usr/lib/foo/bin/tool",
+            "usr/share/foo/tool",
+            "opt/foo/alias",
+        ] {
+            assert_eq!(std::fs::read(dir.join(p)).unwrap(), b"x", "{p}");
+        }
+    }
+
+    #[test]
     fn cpio_traversal_refused() {
         let src = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();

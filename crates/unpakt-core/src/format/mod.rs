@@ -108,13 +108,34 @@ pub(crate) fn decompress(reader: impl BufRead + 'static, head: &[u8]) -> Result<
     Ok(match Compression::from_magic(head) {
         Compression::None => Box::new(reader),
         Compression::Gzip => Box::new(flate2::bufread::MultiGzDecoder::new(reader)),
-        Compression::Xz => Box::new(liblzma::bufread::XzDecoder::new(reader)),
+        Compression::Xz => Box::new(liblzma::bufread::XzDecoder::new_stream(
+            reader,
+            xz_stream()?,
+        )),
         Compression::Zstd => Box::new(
             zstd::Decoder::with_buffer(reader)
                 .map_err(|e| Error::Parse(format!("invalid zstd stream: {e}")))?,
         ),
         Compression::Bzip2 => Box::new(bzip2::bufread::MultiBzDecoder::new(reader)),
     })
+}
+
+/// Above this much memory the xz decoder drops back to one thread.
+const XZ_THREAD_MEMLIMIT: u64 = 512 * 1024 * 1024;
+const XZ_MAX_THREADS: usize = 8;
+
+/// A multithreaded xz decoder. Large vendor packages are split into blocks, so
+/// decoding them in parallel is several times faster than one thread.
+fn xz_stream() -> Result<liblzma::stream::Stream> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(XZ_MAX_THREADS);
+    liblzma::stream::MtStreamBuilder::new()
+        .threads(threads as u32)
+        .memlimit_threading(XZ_THREAD_MEMLIMIT)
+        .memlimit_stop(u64::MAX)
+        .decoder()
+        .map_err(|e| Error::Parse(format!("cannot start the xz decoder: {e}")))
 }
 
 /// Opens `path` as a tar stream, decompressing according to its magic bytes.

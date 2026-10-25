@@ -20,7 +20,7 @@ dirs = "7.0.0"
 flate2 = "1.1.10"
 goblin = "0.10.7"
 hex = "0.4.3"
-liblzma = "0.4.8"
+liblzma = { version = "0.4.8", features = ["parallel"] }
 percent-encoding = "2.3.2"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "json"] }

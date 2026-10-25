@@ -179,6 +179,16 @@ fn resolve_exec(index: &PayloadIndex, argv0: &str) -> Option<PathBuf> {
 /// regular file it ends at. Absolute link targets start again at the payload
 /// root. Gives up after 40 links and on `..` above the root.
 pub(crate) fn resolve_in_payload(index: &PayloadIndex, path: &Path) -> Option<PathBuf> {
+    resolve_links(index, path).filter(|p| index.files.contains(p))
+}
+
+/// Like [`resolve_in_payload`], but returns the directory `path` ends at.
+pub(crate) fn resolve_dir_in_payload(index: &PayloadIndex, path: &Path) -> Option<PathBuf> {
+    resolve_links(index, path).filter(|p| index.dirs.contains(p))
+}
+
+/// The path left after following every payload link in `path`.
+fn resolve_links(index: &PayloadIndex, path: &Path) -> Option<PathBuf> {
     enum Step {
         Root,
         Parent,
@@ -218,8 +228,7 @@ pub(crate) fn resolve_in_payload(index: &PayloadIndex, path: &Path) -> Option<Pa
             }
         }
     }
-    let resolved: PathBuf = stack.iter().collect();
-    index.files.contains(&resolved).then_some(resolved)
+    Some(stack.iter().collect())
 }
 
 fn pick_icon(
@@ -447,6 +456,23 @@ mod tests {
         assert_eq!(resolve_in_payload(&i, Path::new("usr/bin/bar")), want);
         assert_eq!(resolve_in_payload(&i, Path::new("opt/lnk/foo")), want);
         assert_eq!(resolve_in_payload(&i, Path::new("opt/Foo")), None);
+    }
+
+    #[test]
+    fn resolves_directories_through_links() {
+        let mut i = index(&["opt/foo/bin/tool"], &[("usr/lib/foo", "/opt/foo")]);
+        i.dirs = ["opt", "opt/foo", "opt/foo/bin", "usr", "usr/lib"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(
+            resolve_dir_in_payload(&i, Path::new("usr/lib/foo/bin")),
+            Some(PathBuf::from("opt/foo/bin"))
+        );
+        assert_eq!(
+            resolve_dir_in_payload(&i, Path::new("opt/foo/bin/tool")),
+            None
+        );
     }
 
     #[test]

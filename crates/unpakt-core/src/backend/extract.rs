@@ -9,7 +9,7 @@ use super::{Backend, Installed, Plan, copy_cancellable, version_dir};
 use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::open_tar;
-use crate::format::package::resolve_in_payload;
+use crate::format::package::{resolve_dir_in_payload, resolve_in_payload};
 use crate::format::stream::{StreamEntry, StreamKind, for_each_entry};
 use crate::model::{FormatKind, PackageMeta, Payload, PayloadIndex};
 use crate::{Layout, Txn};
@@ -190,10 +190,12 @@ fn link_target(rel: &Path, target: &Path, links: &LinkPolicy<'_>) -> Result<Opti
         }
     }
     let dest: PathBuf = dest.into_iter().collect();
-    if resolve_in_payload(index, &dest).is_none() {
-        tracing::warn!(link = %rel.display(), target = %target.display(), "skipping symlink to a file the package does not contain");
+    let Some(dest) =
+        resolve_in_payload(index, &dest).or_else(|| resolve_dir_in_payload(index, &dest))
+    else {
+        tracing::warn!(link = %rel.display(), target = %target.display(), "skipping symlink to something the package does not contain");
         return Ok(None);
-    }
+    };
     let from: Vec<_> = rel
         .parent()
         .map(|p| p.components().collect())

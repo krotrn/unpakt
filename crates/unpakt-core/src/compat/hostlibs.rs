@@ -151,8 +151,8 @@ fn cstr_at(bytes: &[u8], off: usize) -> Option<&str> {
 
 /// Reads the `glibc-ld.so.cache1.1` format, at the start of `bytes` or after
 /// an old-format block. Maps each soname to the path the loader would use for
-/// `arch`: entries for other architectures are skipped, and entries carrying no
-/// architecture bits are used only when nothing matches the architecture.
+/// `arch`: on x86-64 and aarch64 only entries tagged with that architecture
+/// count, so 32-bit libraries (which carry no architecture bits) are ignored.
 pub(crate) fn parse_ld_so_cache(bytes: &[u8], arch: &Arch) -> Option<BTreeMap<String, PathBuf>> {
     let base = find_new_header(bytes)?;
     let header = bytes.get(base..)?;
@@ -170,10 +170,12 @@ pub(crate) fn parse_ld_so_cache(bytes: &[u8], arch: &Arch) -> Option<BTreeMap<St
         if flags & 0xff != FLAG_ELF_LIBC6 {
             continue;
         }
-        let rank = match flags & 0xff00 {
-            0 => 1,
-            bits if Some(bits) == want => 0,
-            _ => continue,
+        let bits = flags & 0xff00;
+        let rank = match want {
+            Some(w) if bits == w => 0,
+            Some(_) => continue,
+            None if bits == 0 => 1,
+            None => continue,
         };
         let key = u32_at(header, at + 4)? as usize;
         let value = u32_at(header, at + 8)? as usize;
@@ -285,7 +287,11 @@ mod tests {
     }
 
     #[test]
-    fn other_arch_only_entry_is_absent() {
+    fn other_arch_and_untagged_entries_are_absent() {
+        let bytes = build_entries(false, &[(0x0003, "libz.so.1", "/usr/lib32/libz.so.1")]);
+        let map = parse_ld_so_cache(&bytes, &Arch::X86_64).unwrap();
+        assert!(!map.contains_key("libz.so.1"));
+
         let bytes = build_entries(false, &[(0x0a03, "liby.so.1", "/usr/lib/liby.so.1")]);
         let map = parse_ld_so_cache(&bytes, &Arch::X86_64).unwrap();
         assert!(!map.contains_key("liby.so.1"));

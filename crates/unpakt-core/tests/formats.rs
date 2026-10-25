@@ -624,6 +624,28 @@ fn rpm_reads_transaction_scripts() {
 }
 
 #[test]
+fn rpm_reads_trigger_scripts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [E::File("opt/foo/foo", &elf, 0o755)];
+    let path = build_rpm_with(
+        tmp.path(),
+        "a.rpm",
+        rpm_tags("noarch"),
+        &data,
+        &[
+            (1065, "useradd evil"),
+            (5066, "ldconfig"),
+            (5076, "systemctl daemon-reload"),
+        ],
+    );
+    let meta = inspect(&path).unwrap().package.unwrap();
+    let names: Vec<&str> = meta.scripts.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["%trigger", "%filetrigger", "%transfiletrigger"]);
+    assert_eq!(meta.scripts[0].text, "useradd evil");
+}
+
+#[test]
 fn rpm_noarch_accepted() {
     let tmp = tempfile::tempdir().unwrap();
     let elf = build_elf(&[], None, &[], &[]);

@@ -28,6 +28,14 @@ const SCRIPT_TAGS: [(u32, &str); 6] = [
     (1151, "%pretrans"),
     (1152, "%posttrans"),
 ];
+/// Trigger scripts run on other packages' events; each tag holds one script
+/// per trigger.
+const TRIGGER_TAGS: [(u32, &str); 3] = [
+    (1065, "%trigger"),
+    (5066, "%filetrigger"),
+    (5076, "%transfiletrigger"),
+];
+const MAX_TRIGGERS: usize = 64;
 
 const TYPE_STRING: u32 = 6;
 const TYPE_STRING_ARRAY: u32 = 8;
@@ -90,6 +98,14 @@ impl FormatPlugin for Rpm {
         let mut scripts = Vec::new();
         for (tag, label) in SCRIPT_TAGS {
             if let Some(text) = main.strings(tag, 1)?.into_iter().next() {
+                scripts.push(Script {
+                    name: label.to_string(),
+                    text,
+                });
+            }
+        }
+        for (tag, label) in TRIGGER_TAGS {
+            for text in main.strings(tag, MAX_TRIGGERS)? {
                 scripts.push(Script {
                     name: label.to_string(),
                     text,

@@ -70,6 +70,7 @@ impl FormatPlugin for AppImage {
             desktop: None,
             icon: None,
             warnings: vec![format!("could not read AppImage contents: {reason}")],
+            package: None,
         };
         if image_type(&head) == Some(1) {
             return Ok(degraded("type 1 images are not inspected"));
@@ -136,6 +137,7 @@ fn read_contents(
         desktop,
         icon,
         warnings,
+        package: None,
     })
 }
 

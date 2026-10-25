@@ -141,13 +141,23 @@ fn link_target<R: Read>(entry: &tar::Entry<'_, R>) -> Result<PathBuf> {
 const AR_HEADER_BYTES: u64 = 60;
 const MAX_AR_NAME_TABLE: u64 = 1024 * 1024;
 
-/// Walks the member headers of the ar archive at `path` without reading any
-/// data, so sizes that exceed the file or a huge GNU name table are refused
-/// before the `ar` crate allocates for them.
-pub(crate) fn check_ar(path: &Path) -> Result<()> {
+/// One member of an ar archive: its name and where its data lies.
+#[derive(Debug)]
+pub(crate) struct ArMember {
+    pub name: String,
+    pub start: u64,
+    pub size: u64,
+}
+
+/// Lists the members of the ar archive at `path` from their headers alone,
+/// refusing sizes that exceed the file and a huge GNU name table. Deb member
+/// names are short, so only the 16-byte name field is read; a GNU trailing
+/// `/` is dropped.
+pub(crate) fn ar_members(path: &Path) -> Result<Vec<ArMember>> {
     let bad = |what: &str| Error::Parse(format!("invalid ar archive: {what}"));
     let mut file = File::open(path).at(path)?;
     let len = file.metadata().at(path)?.len();
+    let mut members = Vec::new();
     let mut pos: u64 = 8;
     while pos < len {
         file.seek(SeekFrom::Start(pos)).at(path)?;
@@ -165,34 +175,29 @@ pub(crate) fn check_ar(path: &Path) -> Result<()> {
         if size > len - data {
             return Err(bad("member is larger than the file"));
         }
+        let name = String::from_utf8_lossy(&header[..16]);
+        let name = name.trim_end_matches(' ');
+        if !name.starts_with('/') {
+            members.push(ArMember {
+                name: name.trim_end_matches('/').to_string(),
+                start: data,
+                size,
+            });
+        }
         pos = data + size + (size & 1);
     }
-    Ok(())
+    Ok(members)
 }
 
 /// Opens `path` positioned at the data of the ar member `member`; returns the
 /// file and the member's size.
 fn seek_ar_member(path: &Path, member: &str) -> Result<(File, u64)> {
-    check_ar(path)?;
-    let file = File::open(path).at(path)?;
-    let bad = |e: std::io::Error| Error::Parse(format!("invalid ar archive: {e}"));
-    let mut archive = ar::Archive::new(&file);
-    let mut found = None;
-    while let Some(entry) = archive.next_entry() {
-        let entry = entry.map_err(bad)?;
-        if entry.header().identifier() == member.as_bytes() {
-            let start = (&file).stream_position().at(path)?;
-            found = Some((start, entry.header().size()));
-            break;
-        }
-    }
-    drop(archive);
-    let Some((start, size)) = found else {
+    let Some(found) = ar_members(path)?.into_iter().find(|m| m.name == member) else {
         return Err(Error::Parse(format!("ar member `{member}` not found")));
     };
-    let mut file = file;
-    file.seek(SeekFrom::Start(start)).at(path)?;
-    Ok((file, size))
+    let mut file = File::open(path).at(path)?;
+    file.seek(SeekFrom::Start(found.start)).at(path)?;
+    Ok((file, found.size))
 }
 
 #[cfg(test)]

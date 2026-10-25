@@ -1,0 +1,47 @@
+name: Audit
+
+# Checks Cargo.lock against the RustSec advisory database. Runs weekly as well,
+# since an advisory can be published against a crate that has not changed.
+# Callable from a release workflow so a release never ships a known
+# vulnerable dependency.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - Cargo.lock
+      - .github/workflows/audit.yml
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - Cargo.lock
+      - .github/workflows/audit.yml
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rustsec:
+    name: RustSec advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-audit
+
+      - name: Audit Cargo.lock
+        run: cargo audit --deny warnings

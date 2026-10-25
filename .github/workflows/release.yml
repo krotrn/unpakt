@@ -52,9 +52,13 @@ jobs:
     needs: verify
     uses: ./.github/workflows/packages.yml
 
+  audit:
+    needs: verify
+    uses: ./.github/workflows/audit.yml
+
   attest:
     name: Collect and attest artifacts
-    needs: [verify, ci, packages]
+    needs: [verify, ci, packages, audit]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -322,7 +326,7 @@ jobs:
       - name: Authenticate with crates.io
         id: auth
         if: steps.creds.outputs.has == 'true' && env.TRUSTED == 'true'
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
 
       - name: Install GTK and libadwaita
         if: steps.creds.outputs.has == 'true'
@@ -330,7 +334,9 @@ jobs:
 
       - name: Set up Rust
         if: steps.creds.outputs.has == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
 
       - name: Publish
         if: steps.creds.outputs.has == 'true'

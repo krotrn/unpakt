@@ -1,0 +1,11 @@
+# Keeps the commit SHAs that third-party actions are pinned to current; the
+# version comment beside each pin is updated with it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

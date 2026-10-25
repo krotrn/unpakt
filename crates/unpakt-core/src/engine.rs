@@ -121,6 +121,7 @@ pub struct Engine {
     http: Http,
     cancel: Cancel,
     progress: ProgressFn,
+    host_libs: std::cell::OnceCell<crate::compat::HostLibs>,
 }
 
 fn now() -> i64 {
@@ -251,7 +252,23 @@ impl Engine {
             http: Http::from_env()?,
             cancel: Cancel::new(),
             progress: Arc::new(|_| {}),
+            host_libs: std::cell::OnceCell::new(),
         })
+    }
+
+    /// Uses `libs` instead of probing the running system.
+    pub fn with_host_libs(self, libs: crate::compat::HostLibs) -> Engine {
+        let cell = std::cell::OnceCell::new();
+        let _ = cell.set(libs);
+        Engine {
+            host_libs: cell,
+            ..self
+        }
+    }
+
+    #[allow(dead_code)]
+    fn host_libs(&self) -> &crate::compat::HostLibs {
+        self.host_libs.get_or_init(crate::compat::HostLibs::probe)
     }
 
     pub fn with_path_var(mut self, path_var: OsString) -> Engine {

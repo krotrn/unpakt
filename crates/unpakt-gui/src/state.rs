@@ -189,6 +189,10 @@ pub enum Effect {
         title: String,
         body: String,
     },
+    /// The update brings compatibility problems the user has not accepted.
+    OfferUpdateAnyway {
+        body: String,
+    },
     Toast(String),
     Close,
 }
@@ -346,6 +350,12 @@ impl Model {
             } => Effect::OfferWithoutCommand {
                 title: "Command already exists".into(),
                 body: shadowed_body(command, by),
+            },
+            Event::Failed {
+                op: Op::Update,
+                error: Error::NeedsAcceptance(message),
+            } => Effect::OfferUpdateAnyway {
+                body: message.clone(),
             },
             Event::Failed { op, error } => Effect::ShowError {
                 title: failure_title(*op).into(),
@@ -820,6 +830,23 @@ mod tests {
         });
         assert!(matches!(effect, Effect::ShowError { .. }));
         assert!(matches!(m.busy, Busy::Working { .. }));
+    }
+
+    #[test]
+    fn update_with_new_risks_offers_to_update_anyway() {
+        let mut m = Model::default();
+        m.start(Op::Update);
+        let effect = m.on_event(&Event::Failed {
+            op: Op::Update,
+            error: Error::NeedsAcceptance("foo 2.0 adds new compatibility problems".into()),
+        });
+        assert_eq!(
+            effect,
+            Effect::OfferUpdateAnyway {
+                body: "foo 2.0 adds new compatibility problems".into()
+            }
+        );
+        assert_eq!(m.busy, Busy::Idle);
     }
 
     #[test]

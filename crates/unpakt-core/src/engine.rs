@@ -117,7 +117,16 @@ pub struct InstallPlan {
     /// package is of the host's family.
     pub native_hint: Option<String>,
     /// Another asset of the release that would install without these problems.
-    pub alternative: Option<String>,
+    pub alternative: Option<Alternative>,
+}
+
+/// A portable asset of the same release, offered when a package is not
+/// expected to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alternative {
+    pub asset: String,
+    pub url: String,
+    pub format: FormatKind,
 }
 
 impl InstallPlan {
@@ -129,7 +138,7 @@ impl InstallPlan {
                 "{name} needs newer system libraries than this machine has; nothing was installed"
             ),
             Some(Verdict::Risky(_)) if !self.opts.allow_risky => {
-                format!("{name} may not run here; pass --allow-risky to install anyway")
+                format!("{name} may not run here")
             }
             _ => return None,
         };
@@ -139,11 +148,17 @@ impl InstallPlan {
                 message.push_str(&finding.detail);
             }
         }
-        if let Some(alternative) = &self.alternative {
-            message.push('\n');
-            message.push_str(alternative);
-        }
         Some(message)
+    }
+
+    /// The error to refuse this plan with: a risky plan can still be accepted,
+    /// one that needs a container cannot.
+    pub fn refusal(&self) -> Option<Error> {
+        let message = self.blocked()?;
+        Some(match self.compat {
+            Some(Verdict::Risky(_)) => Error::NeedsAcceptance(message),
+            _ => Error::Refused(message),
+        })
     }
 }
 
@@ -659,12 +674,10 @@ impl Engine {
                 .find_map(|kind| {
                     choose(&release.assets, &self.host, pattern.as_ref(), Some(kind))
                         .ok()
-                        .map(|a| {
-                            format!(
-                                "This release also has {}; install it with --format {}",
-                                a.name,
-                                kind.as_str()
-                            )
+                        .map(|a| Alternative {
+                            asset: a.name.clone(),
+                            url: a.url.clone(),
+                            format: kind,
                         })
                 })
         } else {
@@ -714,8 +727,8 @@ impl Engine {
 
     pub fn install(&mut self, p: InstallPlan) -> Result<AppRecord> {
         let _download = self.download_guard(&p.plan.artifact.path);
-        if let Some(message) = p.blocked() {
-            return Err(Error::Refused(message));
+        if let Some(error) = p.refusal() {
+            return Err(error);
         }
         let id = p.plan.id.clone();
         let _lock = self.begin()?;
@@ -966,8 +979,8 @@ impl Engine {
                     .filter(|t| !accepted.contains(*t))
                     .collect();
                 if !new.is_empty() && !allow_risky {
-                    return Err(Error::Refused(format!(
-                        "{id} {label} adds new compatibility problems ({}); current version kept. Run `unpakt update {id} --allow-risky` to accept them",
+                    return Err(Error::NeedsAcceptance(format!(
+                        "{id} {label} adds new compatibility problems ({}); current version kept",
                         new.join(", ")
                     )));
                 }

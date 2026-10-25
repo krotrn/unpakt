@@ -248,9 +248,9 @@ fn run(command: Command) -> Result<()> {
             };
             let plan = engine.inspect(&input, opts)?;
             output::print_summary(&plan);
-            if let Some(message) = plan.blocked() {
+            if let Some(error) = refusal_with_alternative(&plan) {
                 engine.discard(plan);
-                return Err(Error::Refused(message).into());
+                return Err(error.into());
             }
             if !yes && let Err(e) = confirm("install", "Install?") {
                 engine.discard(plan);
@@ -372,7 +372,7 @@ fn update_apps(
         match outcome {
             Ok(new) => report_update(&app.id, &info.current, new),
             Err(e) => {
-                refused |= matches!(e, Error::Refused(_));
+                refused |= matches!(e, Error::Refused(_) | Error::NeedsAcceptance(_));
                 note_update_failure(&app.id, e, &mut failed)?
             }
         }
@@ -381,6 +381,23 @@ fn update_apps(
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// The plan's refusal, with the release's portable alternative named the way
+/// this command line installs it.
+fn refusal_with_alternative(plan: &unpakt_core::engine::InstallPlan) -> Option<Error> {
+    let hint = plan.alternative.as_ref().map_or_else(String::new, |a| {
+        format!(
+            "\nThis release also has {}; install it with --format {}",
+            a.asset,
+            a.format.as_str()
+        )
+    });
+    Some(match plan.refusal()? {
+        Error::NeedsAcceptance(m) => Error::NeedsAcceptance(m + &hint),
+        Error::Refused(m) => Error::Refused(m + &hint),
+        other => other,
+    })
 }
 
 /// An update run that refused any app exits like a refusal, not a failure.
@@ -414,6 +431,9 @@ fn note_update_failure(id: &str, e: Error, failed: &mut usize) -> Result<()> {
         return Err(e.into());
     }
     eprintln!("error: {id}: {}", clean_lines(&format!("{e:#}")));
+    if matches!(e, Error::NeedsAcceptance(_)) {
+        eprintln!("  run `unpakt update {id} --allow-risky` to accept them");
+    }
     *failed += 1;
     Ok(())
 }
@@ -442,7 +462,10 @@ fn exit_code(err: &anyhow::Error) -> u8 {
     }
     let refused = err.is::<NeedsConfirmation>()
         || err.is::<UpdatesRefused>()
-        || matches!(err.downcast_ref::<Error>(), Some(Error::Refused(_)));
+        || matches!(
+            err.downcast_ref::<Error>(),
+            Some(Error::Refused(_) | Error::NeedsAcceptance(_))
+        );
     if refused { EXIT_REFUSED } else { EXIT_ERROR }
 }
 
@@ -464,6 +487,9 @@ fn main() -> ExitCode {
                 eprintln!("{}", clean_lines(&err.to_string()));
             } else {
                 eprintln!("error: {}", clean_lines(&format!("{err:#}")));
+                if matches!(err.downcast_ref::<Error>(), Some(Error::NeedsAcceptance(_))) {
+                    eprintln!("pass --allow-risky to accept them");
+                }
             }
             ExitCode::from(exit_code(&err))
         }

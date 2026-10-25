@@ -28,6 +28,10 @@ pub enum Error {
     Parse(String),
     #[error("interrupted")]
     Interrupted,
+    /// A risky install or update that the user may still accept by asking
+    /// again with acceptance.
+    #[error("refused: {0}")]
+    NeedsAcceptance(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

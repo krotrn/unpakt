@@ -857,9 +857,9 @@ mod package_updates {
             vec![deb(src.path(), "2.0.0", true, &["libnotthere.so.9"])],
         );
         match engine.update(&id) {
-            Err(Error::Refused(m)) => {
+            Err(Error::NeedsAcceptance(m)) => {
                 assert!(m.contains("system-integration"), "{m}");
-                assert!(m.contains("--allow-risky"), "{m}");
+                assert!(!m.contains("--"), "front-end flags leaked into {m}");
             }
             other => panic!("{other:?}"),
         }

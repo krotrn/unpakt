@@ -387,6 +387,28 @@ mod packages {
     }
 
     #[test]
+    fn package_link_to_its_own_directory_points_at_dot() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let rpm = rpm_with(src.path(), &[E::Link("opt/Foo/self", "/opt/Foo")]);
+        let (_, done) = install(root.path(), rpm).unwrap();
+        assert_eq!(
+            std::fs::read_link(done.version_dir.join("opt/Foo/self")).unwrap(),
+            PathBuf::from(".")
+        );
+    }
+
+    #[test]
+    fn package_relative_link_leaving_the_tree_is_skipped() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let rpm = rpm_with(src.path(), &[E::Link("usr/lib/esc", "../../../../etc")]);
+        let (_, done) = install(root.path(), rpm).unwrap();
+        assert!(done.version_dir.join("opt/Foo/foo").is_file());
+        assert!(std::fs::symlink_metadata(done.version_dir.join("usr/lib/esc")).is_err());
+    }
+
+    #[test]
     fn package_links_through_directory_links_resolve() {
         let src = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();

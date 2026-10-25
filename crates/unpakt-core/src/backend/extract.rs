@@ -209,6 +209,9 @@ fn link_target(rel: &Path, target: &Path, links: &LinkPolicy<'_>) -> Result<Opti
     for c in &to[common..] {
         out.push(c);
     }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
     Ok(Some(out))
 }
 

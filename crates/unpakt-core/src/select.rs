@@ -44,6 +44,8 @@ const OTHER_ARCH_TOKENS: &[&str] = &[
     "ppc",
     "ppc64",
     "ppc64le",
+    "ppc64el",
+    "armv7hl",
     "powerpc",
     "s390x",
     "riscv64",
@@ -125,7 +127,7 @@ pub fn score_asset(
     {
         score += 40;
     }
-    if tokens.iter().any(|t| t == "linux") {
+    if !is_package && tokens.iter().any(|t| t == "linux") {
         score += 10;
     }
     Some(score)
@@ -273,6 +275,39 @@ mod tests {
         assert_eq!(
             pick(&arch, &["app-1.0-1-any.pkg.tar.zst"]).unwrap(),
             "app-1.0-1-any.pkg.tar.zst"
+        );
+    }
+
+    #[test]
+    fn linux_token_does_not_lift_packages() {
+        let host = host_of("ubuntu");
+        let list = assets(&["app-linux.deb", "app.tar.gz"]);
+        assert_eq!(choose(&list, &host, None, None).unwrap().name, "app.tar.gz");
+    }
+
+    #[test]
+    fn foreign_arch_packages_are_rejected() {
+        let host = host_of("ubuntu");
+        for name in [
+            "app_1.0_armhf.deb",
+            "app_1.0_armel.deb",
+            "app_1.0_i386.deb",
+            "app_1.0_ppc64el.deb",
+            "app-1.0.s390x.rpm",
+            "app-1.0.armv7hl.rpm",
+            "app-1.0.i686.rpm",
+            "app-1.0.riscv64.rpm",
+        ] {
+            assert_eq!(score_asset(name, &host, None, None), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn equal_packages_keep_the_earliest() {
+        let list = assets(&["app-1.0.x86_64.rpm", "app_1.0_amd64.deb"]);
+        assert_eq!(
+            choose(&list, &host_of("arch"), None, None).unwrap().name,
+            "app-1.0.x86_64.rpm"
         );
     }
 

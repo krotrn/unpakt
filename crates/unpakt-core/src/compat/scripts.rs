@@ -88,8 +88,8 @@ const SYSTEM_COMMANDS: [&str; 11] = [
     "dkms",
 ];
 
-const LEADING: [&str; 9] = [
-    "if", "then", "else", "!", "elif", "while", "do", "exec", "sudo",
+const LEADING: [&str; 10] = [
+    "if", "then", "else", "!", "elif", "while", "do", "exec", "sudo", "env",
 ];
 
 pub(crate) fn assess(text: &str, index: &PayloadIndex) -> Vec<ScriptIssue> {
@@ -147,16 +147,29 @@ fn sets_setuid(line: &str) -> bool {
         if words.next().map(|w| w.rsplit('/').next().unwrap_or(w)) != Some("chmod") {
             return false;
         }
-        words
-            .filter(|w| !w.starts_with('-') || w.contains("+s"))
-            .any(|w| {
-                let w = w.trim_matches(|c| c == '\'' || c == '"');
-                w.contains("+s")
-                    || (w.len() == 4
-                        && w.chars().all(|c| c.is_ascii_digit())
-                        && matches!(w.as_bytes()[0], b'2' | b'4' | b'6'))
-            })
+        let Some(mode) = words.find(|w| !w.starts_with('-')) else {
+            return false;
+        };
+        let mode = mode.trim_matches(|c| c == '\'' || c == '"');
+        (mode.len() == 4
+            && mode.chars().all(|c| c.is_ascii_digit())
+            && matches!(mode.as_bytes()[0], b'2' | b'4' | b'6'))
+            || mode.split(',').any(adds_setid_symbolically)
     })
+}
+
+/// `u+s`, `g+s`, `+s`, `ug+s`, `u=rwxs` and the like.
+fn adds_setid_symbolically(clause: &str) -> bool {
+    let Some(op) = clause.find(['+', '=']) else {
+        return false;
+    };
+    clause[..op]
+        .chars()
+        .all(|c| matches!(c, 'u' | 'g' | 'o' | 'a'))
+        && clause[op + 1..]
+            .chars()
+            .take_while(|c| !matches!(c, '+' | '-' | '='))
+            .any(|c| c == 's')
 }
 
 fn is_assignment(w: &str) -> bool {
@@ -332,6 +345,35 @@ mod tests {
         ] {
             assert!(unrecognized_line(line, &i).is_some(), "{line}");
         }
+    }
+
+    #[test]
+    fn env_prefix_and_chmod_mode_argument() {
+        let i = none();
+        assert!(matches!(
+            assess("env X=1 setcap cap_net_raw+ep /opt/x/y", &i)[..],
+            [ScriptIssue::System(_)]
+        ));
+        assert!(matches!(
+            assess("env useradd foo", &i)[..],
+            [ScriptIssue::System(_)]
+        ));
+        assert!(matches!(
+            assess("env chmod 4755 /opt/Foo/x", &i)[..],
+            [ScriptIssue::Setuid(_)]
+        ));
+        assert!(matches!(
+            assess("chmod -R g+s /opt/Foo", &i)[..],
+            [ScriptIssue::Setuid(_)]
+        ));
+        assert!(matches!(
+            assess("chmod 755 /opt/c++stuff", &i)[..],
+            [ScriptIssue::Other(_)]
+        ));
+        assert!(matches!(
+            assess("chmod a+x /opt/c+sx", &i)[..],
+            [ScriptIssue::Other(_)]
+        ));
     }
 
     #[test]

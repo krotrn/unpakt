@@ -6,6 +6,7 @@ use common::{
 };
 use std::ffi::OsString;
 use unpakt_core::Layout;
+use unpakt_core::cancel::Cancel;
 use unpakt_core::compat::HostLibs;
 use unpakt_core::engine::{AddOpts, Engine};
 use unpakt_core::format::detect;
@@ -36,7 +37,7 @@ fn inspect_never_executes_input() {
             file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
             path,
         };
-        detect(&a).unwrap().inspect(&a).unwrap();
+        detect(&a).unwrap().inspect(&a, &Cancel::new()).unwrap();
         assert!(!marker.exists(), "inspecting {} ran its input", a.file_name);
     }
 }

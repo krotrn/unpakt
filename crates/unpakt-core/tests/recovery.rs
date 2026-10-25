@@ -57,7 +57,10 @@ fn plan_for(path: PathBuf, id: &str) -> Plan {
         file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
         path,
     };
-    let payload = detect(&artifact).unwrap().inspect(&artifact).unwrap();
+    let payload = detect(&artifact)
+        .unwrap()
+        .inspect(&artifact, &Cancel::new())
+        .unwrap();
     let entry = payload.entries.first().cloned();
     Plan {
         id: id.into(),

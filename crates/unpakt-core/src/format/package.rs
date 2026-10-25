@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::stream::{DataSource, StreamKind, for_each_entry};
 use super::tree::{Record, RecordKind, candidates, find_icon, icon_ext, sort_candidates};
+use crate::cancel::Cancel;
 use crate::compat::elf::{ElfFacts, MAX_ELF_BYTES};
 use crate::desktop::{DesktopEntry, exec_argv0};
 use crate::error::{Error, Result};
@@ -63,7 +64,12 @@ fn host_name(arch: &Arch) -> &str {
     }
 }
 
-pub(crate) fn inspect_package(a: &Artifact, h: Header, host_arch: &Arch) -> Result<Payload> {
+pub(crate) fn inspect_package(
+    a: &Artifact,
+    h: Header,
+    host_arch: &Arch,
+    cancel: &Cancel,
+) -> Result<Payload> {
     let arch = h.arch.as_str();
     if !NEUTRAL_ARCHES.contains(&arch) && !host_arch.package_aliases().contains(&arch) {
         return Err(Error::Refused(format!(
@@ -80,7 +86,7 @@ pub(crate) fn inspect_package(a: &Artifact, h: Header, host_arch: &Arch) -> Resu
         scripts,
         mut warnings,
         ..
-    } = scan(&h.data, &h.name)?;
+    } = scan(&h.data, &h.name, cancel)?;
 
     let mut desktop_entry = None;
     let mut desktop = None;
@@ -321,13 +327,14 @@ fn read_more(reader: &mut dyn Read, limit: u64, buf: &mut Vec<u8>) -> Result<boo
     Ok(buf.len() as u64 <= limit)
 }
 
-fn scan(data: &DataSource, package_name: &str) -> Result<Scan> {
+fn scan(data: &DataSource, package_name: &str, cancel: &Cancel) -> Result<Scan> {
     let mut s = Scan {
         package_name: package_name.to_string(),
         ..Scan::default()
     };
     let mut seen: HashMap<PathBuf, usize> = HashMap::new();
     for_each_entry(data, |entry| {
+        cancel.check()?;
         let path = entry.path;
         let mut parent = path.parent();
         while let Some(p) = parent.filter(|p| !p.as_os_str().is_empty()) {

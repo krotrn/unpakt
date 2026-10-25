@@ -4,6 +4,7 @@ use std::path::Path;
 use super::package::{Header, inspect_package};
 use super::stream::{DataSource, ar_members, normalize};
 use super::{Confidence, FormatPlugin, decompress, peek_head, read_head};
+use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Arch, Artifact, FormatKind, PackageFamily, Payload, Script};
 
@@ -32,7 +33,7 @@ impl FormatPlugin for Deb {
         )
     }
 
-    fn inspect(&self, a: &Artifact) -> Result<Payload> {
+    fn inspect(&self, a: &Artifact, cancel: &Cancel) -> Result<Payload> {
         let (control, data) = read_members(&a.path)?;
         let (fields, scripts) = read_control(&control)?;
         let field = |key: &str| {
@@ -63,7 +64,7 @@ impl FormatPlugin for Deb {
                 member: data,
             },
         };
-        inspect_package(a, header, &Arch::current())
+        inspect_package(a, header, &Arch::current(), cancel)
     }
 }
 

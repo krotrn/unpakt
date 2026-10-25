@@ -584,7 +584,7 @@ impl Engine {
         };
         self.emit(Progress::Inspecting);
         self.cancel.check()?;
-        let payload = detect(&artifact)?.inspect(&artifact)?;
+        let payload = detect(&artifact)?.inspect(&artifact, &self.cancel)?;
         if let Some(wanted) = opts.format
             && payload.format != wanted
         {

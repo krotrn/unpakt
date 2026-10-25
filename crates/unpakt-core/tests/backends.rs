@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use common::{Comp, E, build_appimage, build_tarball, tree_snapshot};
 use unpakt_core::backend::{Plan, for_payload};
+use unpakt_core::cancel::Cancel;
 use unpakt_core::format::detect;
 use unpakt_core::model::Artifact;
 use unpakt_core::{Error, Layout, Txn};
@@ -16,7 +17,10 @@ fn plan_for(path: PathBuf, id: &str) -> Plan {
         file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
         path,
     };
-    let payload = detect(&artifact).unwrap().inspect(&artifact).unwrap();
+    let payload = detect(&artifact)
+        .unwrap()
+        .inspect(&artifact, &Cancel::new())
+        .unwrap();
     let entry = payload.entries.first().cloned();
     Plan {
         id: id.into(),
@@ -452,7 +456,7 @@ mod packages {
             path: rpm,
         };
         let result = unpakt_core::format::detect(&artifact)
-            .and_then(|f| f.inspect(&artifact))
+            .and_then(|f| f.inspect(&artifact, &unpakt_core::cancel::Cancel::new()))
             .map(|_| ());
         assert!(matches!(result, Err(Error::Refused(_))), "{result:?}");
         assert!(!root.path().join("evil").exists());

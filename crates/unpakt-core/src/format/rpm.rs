@@ -5,6 +5,7 @@ use std::path::Path;
 use super::package::{Header, inspect_package};
 use super::stream::DataSource;
 use super::{Confidence, FormatPlugin, read_head};
+use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Arch, Artifact, FormatKind, PackageFamily, Payload, Script};
 
@@ -56,7 +57,7 @@ impl FormatPlugin for Rpm {
         })
     }
 
-    fn inspect(&self, a: &Artifact) -> Result<Payload> {
+    fn inspect(&self, a: &Artifact, cancel: &Cancel) -> Result<Payload> {
         let mut file = File::open(&a.path).at(&a.path)?;
         let mut lead = [0u8; LEAD_LEN as usize];
         read_exact(&mut file, &mut lead, &a.path)?;
@@ -124,7 +125,7 @@ impl FormatPlugin for Rpm {
                 offset,
             },
         };
-        inspect_package(a, header, &Arch::current())
+        inspect_package(a, header, &Arch::current(), cancel)
     }
 }
 

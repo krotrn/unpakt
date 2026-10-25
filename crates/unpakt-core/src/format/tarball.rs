@@ -10,6 +10,7 @@ use super::tree::{
     sort_candidates,
 };
 use super::{Confidence, FormatPlugin, open_tar};
+use crate::cancel::Cancel;
 use crate::desktop::DesktopEntry;
 use crate::error::{Error, Result};
 use crate::model::{Artifact, ExecKind, FormatKind, Icon, Payload};
@@ -48,8 +49,8 @@ impl FormatPlugin for Tarball {
         })
     }
 
-    fn inspect(&self, a: &Artifact) -> Result<Payload> {
-        let records = scan(&a.path)?;
+    fn inspect(&self, a: &Artifact, cancel: &Cancel) -> Result<Payload> {
+        let records = scan(&a.path, cancel)?;
         let strip_prefix = common_prefix(&records);
         let rel = |r: &Record| -> Option<PathBuf> {
             let p = match &strip_prefix {
@@ -190,12 +191,13 @@ fn check_links(links: &BTreeMap<PathBuf, PathBuf>, paths: &[PathBuf]) -> Result<
     Ok(())
 }
 
-fn scan(path: &Path) -> Result<Vec<Record>> {
+fn scan(path: &Path, cancel: &Cancel) -> Result<Vec<Record>> {
     let mut archive = open_tar(path)?;
     let bad_tar = |e: std::io::Error| Error::Parse(format!("invalid tar archive: {e}"));
     let mut records = Vec::new();
     let mut links = BTreeMap::new();
     for entry in archive.entries().map_err(bad_tar)? {
+        cancel.check()?;
         let mut entry = entry.map_err(bad_tar)?;
         let raw = entry.path().map_err(bad_tar)?.into_owned();
         let clean_path = clean(&raw)?;

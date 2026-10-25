@@ -216,7 +216,7 @@ install_appimage() {  # the latest release's AppImage, with commands and a launc
 [Desktop Entry]
 Type=Application
 Name=unpakt
-Comment=Install and manage AppImages and tarballs
+Comment=Install and manage AppImages, tarballs and deb, rpm and pacman packages
 Exec=$BIN/unpakt-gui %f
 Icon=io.github.krotrn.Unpakt
 MimeType=application/vnd.appimage;application/x-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-bzip2-compressed-tar;application/x-tar;application/vnd.debian.binary-package;application/x-rpm;application/x-redhat-package-manager;application/vnd.archlinux.pkg;

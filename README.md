@@ -220,31 +220,34 @@ unpakt -vv add https://github.com/owner/repo
 
 ### Compatibility check
 
-Packages are built for a distribution, not for your machine. Before a package is
-installed, unpakt unpacks it into a scratch directory, reads its files and
-reports a verdict:
+Packages are built for a distribution, not for your machine. Before a package
+is installed, unpakt streams through it, reads its metadata, scripts and ELF
+headers, and reports a verdict. This writes nothing to disk:
 
 - `ok`: the package is expected to run here. This is not a statement about
   whether the package is trustworthy; unpakt does not check who made it. Any
-  notes (for example, that a file is setuid and will not be on your machine)
-  are shown but do not change the verdict.
+  notes (for example, that a file is setuid, which is fine where unprivileged
+  user namespaces are available) are shown but do not change the verdict.
 - `risky`: something may stop it from running, such as a library it needs that
-  is missing or older than required, a hardcoded system path that will not
-  exist, files that belong in system directories (services, udev rules, kernel
-  modules), or an install script that sets up accounts or kernel settings.
+  is missing, a hardcoded system path that will not exist, files that belong
+  in system directories (services, udev rules, kernel modules), a setuid file
+  or a script that sets the setuid bit when unprivileged user namespaces are
+  unavailable, or an install script that sets up accounts, capabilities or
+  kernel settings (`useradd`, `setcap`, `sysctl`, `dkms` and the like).
   `add` and `update` refuse a risky package with exit status 2. Pass
   `--allow-risky` to install it anyway; the reasons you accepted are remembered
   for that app, and a later update stops again only when a new reason appears.
-- `needs-container`: the package depends on the host in a way that a per-user
-  install cannot provide. There is no override.
+- `needs-container`: the package needs newer system libraries (for example
+  glibc) than this machine has, which a per-user install cannot provide. There
+  is no override.
 
 `unpakt inspect <file>` prints the verdict without installing anything.
 
 Install scripts (`postinst`, `%post`, `.INSTALL`) are never run. unpakt reads
 them as text. Lines it does not recognise are shown as notes, and only
-account and kernel setup commands (`useradd`, `sysctl`, `modprobe`, and the
-like) make a package risky. A package that needs its script to do something
-beyond that will not have had it done.
+account, capability and kernel setup commands (`useradd`, `setcap`, `sysctl`,
+`modprobe`, `dkms` and the like) make a package risky. A package that needs its
+script to do something beyond that will not have had it done.
 
 Installing system-wide, through the package manager, comes in a later release.
 

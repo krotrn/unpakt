@@ -706,3 +706,199 @@ fn id_suffix_survives_rollback_and_reactivation_once() {
     assert_eq!(name_of(&layout, &id), want);
     validate(&layout.applications.join(format!("unpakt-{id}.desktop")));
 }
+
+mod package_updates {
+    use super::common::{Comp, E, MockForge, build_appimage, build_tarball, deb_with_elf};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use unpakt_core::compat::HostLibs;
+    use unpakt_core::engine::{AddOpts, Engine};
+    use unpakt_core::http::Http;
+    use unpakt_core::manifest::Manifest;
+    use unpakt_core::model::FormatKind;
+    use unpakt_core::{Error, Layout, host::Host};
+
+    const REPO: &str = "https://github.com/o/r";
+
+    fn engine(root: &Path, forge: &MockForge) -> Engine {
+        let layout = Layout::under(root);
+        let bin = OsString::from(layout.bin.clone());
+        let libs = HostLibs::from_parts(
+            BTreeMap::from([("libc.so.6".to_string(), PathBuf::from("/lib/libc.so.6"))]),
+            BTreeMap::from([(
+                "libc.so.6".to_string(),
+                BTreeSet::from(["GLIBC_2.34".to_string()]),
+            )]),
+            true,
+        );
+        Engine::new(
+            layout,
+            Host {
+                fuse2: true,
+                ..Host::detect()
+            },
+        )
+        .unwrap()
+        .with_path_var(bin)
+        .with_host_libs(libs)
+        .with_http(Http::new(&forge.api_url(), None).unwrap())
+    }
+
+    fn option(root: &Path, id: &str, key: &str) -> Option<String> {
+        Manifest::open(&Layout::under(root).db)
+            .unwrap()
+            .option(id, key)
+            .unwrap()
+    }
+
+    fn tarball(dir: &Path, version: &str) -> (String, Vec<u8>) {
+        let name = format!("app-{version}.tar.gz");
+        let body = format!("\x7fELF-{version}");
+        let path = build_tarball(
+            dir,
+            &name,
+            Comp::Gz,
+            &[E::File("app/app", body.as_bytes(), 0o755)],
+        );
+        (name, std::fs::read(path).unwrap())
+    }
+
+    fn appimage(dir: &Path, version: &str) -> (String, Vec<u8>) {
+        let name = format!("app-{version}.AppImage");
+        let body = format!("\x7fELF-{version}");
+        let path = build_appimage(dir, &name, &[E::File("AppRun", body.as_bytes(), 0o755)]);
+        (name, std::fs::read(path).unwrap())
+    }
+
+    fn deb(dir: &Path, version: &str, unit: bool, needs: &[&str]) -> (String, Vec<u8>) {
+        let (name, path) = deb_with_elf(dir, version, needs, &[], unit);
+        (name, std::fs::read(path).unwrap())
+    }
+
+    fn install_risky(engine: &mut Engine) -> String {
+        let opts = AddOpts {
+            allow_risky: true,
+            ..AddOpts::default()
+        };
+        let plan = engine.inspect(REPO, opts).unwrap();
+        engine.install(plan).unwrap().id
+    }
+
+    #[test]
+    fn update_keeps_installed_format() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path(), &forge);
+        forge.publish("1.0.0", vec![tarball(src.path(), "1.0")]);
+        let plan = engine.inspect(REPO, AddOpts::default()).unwrap();
+        let id = engine.install(plan).unwrap().id;
+
+        forge.publish(
+            "2.0.0",
+            vec![tarball(src.path(), "2.0"), appimage(src.path(), "2.0")],
+        );
+        assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+        assert_eq!(engine.get(&id).unwrap().0.format, FormatKind::Tarball);
+    }
+
+    #[test]
+    fn update_reports_missing_format() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path(), &forge);
+        forge.publish("1.0.0", vec![tarball(src.path(), "1.0")]);
+        let plan = engine.inspect(REPO, AddOpts::default()).unwrap();
+        let id = engine.install(plan).unwrap().id;
+
+        forge.publish("2.0.0", vec![appimage(src.path(), "2.0")]);
+        match engine.update(&id) {
+            Err(Error::NotFound(m)) => assert!(m.contains("tarball"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.get(&id).unwrap().0.current, "1.0.0");
+    }
+
+    #[test]
+    fn risky_update_with_accepted_tags_proceeds() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path(), &forge);
+        forge.publish(
+            "1.0.0",
+            vec![deb(src.path(), "1.0.0", false, &["libnotthere.so.9"])],
+        );
+        let id = install_risky(&mut engine);
+
+        forge.publish(
+            "2.0.0",
+            vec![deb(src.path(), "2.0.0", false, &["libnotthere.so.9"])],
+        );
+        assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+    }
+
+    #[test]
+    fn risky_update_with_new_tag_keeps_current() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path(), &forge);
+        forge.publish(
+            "1.0.0",
+            vec![deb(src.path(), "1.0.0", false, &["libnotthere.so.9"])],
+        );
+        let id = install_risky(&mut engine);
+
+        forge.publish(
+            "2.0.0",
+            vec![deb(src.path(), "2.0.0", true, &["libnotthere.so.9"])],
+        );
+        match engine.update(&id) {
+            Err(Error::Refused(m)) => {
+                assert!(m.contains("system-integration"), "{m}");
+                assert!(m.contains("--allow-risky"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(engine.get(&id).unwrap().0.current, "1.0.0");
+
+        assert_eq!(engine.update_with(&id, true).unwrap(), Some("2.0.0".into()));
+        assert_eq!(
+            option(root.path(), &id, "compat.accepted").as_deref(),
+            Some("missing-library,system-integration")
+        );
+    }
+
+    #[test]
+    fn needs_container_update_keeps_current() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path(), &forge);
+        forge.publish(
+            "1.0.0",
+            vec![deb(src.path(), "1.0.0", false, &["libc.so.6"])],
+        );
+        let plan = engine.inspect(REPO, AddOpts::default()).unwrap();
+        let id = engine.install(plan).unwrap().id;
+
+        let (name, path) = deb_with_elf(
+            src.path(),
+            "2.0.0",
+            &["libc.so.6"],
+            &[("libc.so.6", "GLIBC_9.99")],
+            false,
+        );
+        forge.publish("2.0.0", vec![(name, std::fs::read(path).unwrap())]);
+        for allow in [false, true] {
+            match engine.update_with(&id, allow) {
+                Err(Error::Refused(m)) => assert!(m.contains("current version kept"), "{m}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(engine.get(&id).unwrap().0.current, "1.0.0");
+    }
+}

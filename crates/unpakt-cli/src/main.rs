@@ -224,6 +224,7 @@ fn run(command: Command) -> Result<()> {
                 no_bin,
                 force,
                 pattern,
+                ..AddOpts::default()
             };
             let plan = engine.inspect(&input, opts)?;
             output::print_summary(&plan);

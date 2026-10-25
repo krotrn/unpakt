@@ -14,10 +14,11 @@ use url::Url;
 
 use crate::backend::{Plan, for_payload};
 use crate::cancel::Cancel;
+use crate::compat::{Verdict, check as check_compat};
 use crate::desktop::{DesktopEntry, exec_argv0};
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::detect;
-use crate::host::Host;
+use crate::host::{Host, native_install_hint};
 use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
 use crate::journal::{Expect, Intent};
@@ -93,6 +94,10 @@ pub struct AddOpts {
     pub no_bin: bool,
     pub force: bool,
     pub pattern: Option<String>,
+    /// Restricts the release asset to this format.
+    pub format: Option<FormatKind>,
+    /// Installs a package judged risky anyway.
+    pub allow_risky: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +109,40 @@ pub struct InstallPlan {
     pub want_desktop: bool,
     pub command: Option<String>,
     pub opts: AddOpts,
+    /// Whether the extracted package is expected to run here; `Some` for packages.
+    pub compat: Option<Verdict>,
+    /// The host's own package manager command for the same file, when the
+    /// package is of the host's family.
+    pub native_hint: Option<String>,
+    /// Another asset of the release that would install without these problems.
+    pub alternative: Option<String>,
+}
+
+impl InstallPlan {
+    /// Why this plan must not be installed, or `None` when it may proceed.
+    pub fn blocked(&self) -> Option<String> {
+        let name = &self.plan.name;
+        let mut message = match &self.compat {
+            Some(Verdict::NeedsContainer(_)) => format!(
+                "{name} needs newer system libraries than this machine has; nothing was installed"
+            ),
+            Some(Verdict::Risky(_)) if !self.opts.allow_risky => {
+                format!("{name} may not run here; pass --allow-risky to install anyway")
+            }
+            _ => return None,
+        };
+        if let Some(verdict) = &self.compat {
+            for finding in verdict.findings().iter().filter(|f| !f.note) {
+                message.push_str("\n  - ");
+                message.push_str(&finding.detail);
+            }
+        }
+        if let Some(alternative) = &self.alternative {
+            message.push('\n');
+            message.push_str(alternative);
+        }
+        Some(message)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +236,10 @@ fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) 
         .unwrap_or_else(|| id.to_string())
 }
 
+fn join_tags(tags: &std::collections::BTreeSet<&'static str>) -> String {
+    tags.iter().copied().collect::<Vec<_>>().join(",")
+}
+
 fn sha256_prefix(path: &Path, cancel: &Cancel) -> Result<String> {
     let mut file = std::fs::File::open(path).at(path)?;
     let mut hasher = Sha256::new();
@@ -266,7 +309,6 @@ impl Engine {
         }
     }
 
-    #[allow(dead_code)]
     fn host_libs(&self) -> &crate::compat::HostLibs {
         self.host_libs.get_or_init(crate::compat::HostLibs::probe)
     }
@@ -486,7 +528,7 @@ impl Engine {
             self.emit(Progress::Fetching);
         }
         let release = plugin.latest(&source, &self.http)?;
-        let asset = choose(&release.assets, &self.host, pattern.as_ref(), None)?;
+        let asset = choose(&release.assets, &self.host, pattern.as_ref(), opts.format)?;
         let canonical = match source.kind {
             SourceKind::LocalFile => PathBuf::from(&asset.url),
             _ => self.download_asset(&asset.url)?,
@@ -564,6 +606,33 @@ impl Engine {
             Some(default_command(&id, entry.as_ref(), &payload))
         };
 
+        let compat = payload.package.as_ref().map(|meta| {
+            let path = entry.as_ref().map(|e| e.path.clone()).unwrap_or_default();
+            check_compat(meta, &path, self.host_libs())
+        });
+        let native_hint = payload
+            .package
+            .as_ref()
+            .filter(|meta| Some(meta.family) == self.host.family())
+            .map(|meta| native_install_hint(meta.family, &canonical));
+        let alternative = if payload.package.is_some() {
+            [FormatKind::AppImage, FormatKind::Tarball]
+                .into_iter()
+                .find_map(|kind| {
+                    choose(&release.assets, &self.host, pattern.as_ref(), Some(kind))
+                        .ok()
+                        .map(|a| {
+                            format!(
+                                "This release also has {}; install it with --format {}",
+                                a.name,
+                                kind.as_str()
+                            )
+                        })
+                })
+        } else {
+            None
+        };
+
         let plan = Plan {
             id,
             name: payload.name.clone(),
@@ -582,6 +651,9 @@ impl Engine {
             want_desktop,
             command,
             opts,
+            compat,
+            native_hint,
+            alternative,
         })
     }
 
@@ -604,6 +676,9 @@ impl Engine {
 
     pub fn install(&mut self, p: InstallPlan) -> Result<AppRecord> {
         let _download = self.download_guard(&p.plan.artifact.path);
+        if let Some(message) = p.blocked() {
+            return Err(Error::Refused(message));
+        }
         let id = p.plan.id.clone();
         let _lock = self.begin()?;
         if self.manifest.get(&id)?.is_some() {
@@ -674,6 +749,19 @@ impl Engine {
         if let Some(pattern) = &p.opts.pattern {
             options.push(("pattern", pattern));
         }
+        let format_opt = p.opts.format.map(|f| f.as_str());
+        if let Some(format) = format_opt {
+            options.push(("format", format));
+        }
+        let accepted = match &p.compat {
+            Some(verdict @ Verdict::Risky(_)) if p.opts.allow_risky => {
+                Some(join_tags(&verdict.risk_tags()))
+            }
+            _ => None,
+        };
+        if let Some(accepted) = &accepted {
+            options.push(("compat.accepted", accepted));
+        }
         txn.cancel().check()?;
         self.manifest
             .commit_install_with(&app, &version, &integration.files, &options, &[])?;
@@ -722,6 +810,12 @@ impl Engine {
     /// it. Returns the new label, or `None` when already up to date. Any
     /// failure leaves the current version exactly as it was.
     pub fn update(&mut self, id: &str) -> Result<Option<String>> {
+        self.update_with(id, false)
+    }
+
+    /// Like [`Engine::update`]. With `allow_risky`, compatibility problems the
+    /// installed version had not accepted are accepted too.
+    pub fn update_with(&mut self, id: &str, allow_risky: bool) -> Result<Option<String>> {
         let (app, versions, _) = self.get(id)?;
         if app.source.kind == SourceKind::LocalFile {
             return Err(Error::Unsupported(format!(
@@ -771,10 +865,46 @@ impl Engine {
             no_bin: app.command.is_none(),
             force: false,
             pattern,
+            format: Some(app.format),
+            allow_risky: false,
         };
-        let p = self.inspect(&app.source.location, opts)?;
+        let mut p = self.inspect(&app.source.location, opts)?;
         let _download = self.download_guard(&p.plan.artifact.path);
         let label = p.plan.label.clone();
+        let mut accepted_tags: Option<std::collections::BTreeSet<String>> = None;
+        match &p.compat {
+            Some(Verdict::NeedsContainer(_)) => {
+                let message = p.blocked().unwrap_or_default();
+                return Err(Error::Refused(format!("{message}; current version kept")));
+            }
+            Some(verdict @ Verdict::Risky(_)) => {
+                let mut accepted: std::collections::BTreeSet<String> = self
+                    .manifest
+                    .option(id, "compat.accepted")?
+                    .map(|text| {
+                        text.split(',')
+                            .filter(|t| !t.is_empty())
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let new: Vec<&str> = verdict
+                    .risk_tags()
+                    .into_iter()
+                    .filter(|t| !accepted.contains(*t))
+                    .collect();
+                if !new.is_empty() && !allow_risky {
+                    return Err(Error::Refused(format!(
+                        "{id} {label} adds new compatibility problems ({}); current version kept. Run `unpakt update {id} --allow-risky` to accept them",
+                        new.join(", ")
+                    )));
+                }
+                p.opts.allow_risky = true;
+                accepted.extend(new.into_iter().map(String::from));
+                accepted_tags = Some(accepted);
+            }
+            _ => {}
+        }
         if let Some(target) = versions.iter().find(|v| v.label == label) {
             let fetched = Release {
                 version: p.plan.payload.version.clone(),
@@ -879,12 +1009,23 @@ impl Engine {
             exec_kind: installed.kind,
             installed_at: now(),
         };
+        let accepted_text = accepted_tags.map(|tags| {
+            tags.iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let options: Vec<(&str, &str)> = accepted_text
+            .as_deref()
+            .map(|text| ("compat.accepted", text))
+            .into_iter()
+            .collect();
         txn.cancel().check()?;
         self.manifest.commit_install_with(
             &record,
             &version,
             &integration.files,
-            &[],
+            &options,
             &pruned_labels,
         )?;
         txn.commit();

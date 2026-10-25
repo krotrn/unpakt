@@ -1,3 +1,4 @@
+use unpakt_core::compat::Verdict;
 use unpakt_core::engine::{Check, InstallPlan, UpdateInfo};
 use unpakt_core::manifest::{AppRecord, FileRecord, VersionRecord};
 
@@ -13,35 +14,73 @@ fn version_text(label: &str, raw: Option<&str>) -> String {
 }
 
 pub fn print_summary(p: &InstallPlan) {
+    for line in summary_lines(p) {
+        println!("{line}");
+    }
+}
+
+pub fn summary_lines(p: &InstallPlan) -> Vec<String> {
     let plan = &p.plan;
-    println!("name:    {}", plan.name);
-    println!(
-        "version: {}",
-        version_text(&plan.label, plan.payload.version.as_deref())
-    );
-    println!("id:      {}", plan.id);
-    println!("source:  {}", p.source.location);
-    println!("asset:   {}", plan.artifact.file_name);
-    println!("format:  {} -> {}", plan.payload.format.as_str(), p.backend);
-    match &plan.entry {
-        Some(entry) => println!("entry:   {}", entry.path.display()),
-        None => println!("entry:   (the file itself)"),
-    }
+    let mut out = vec![
+        format!("name:    {}", plan.name),
+        format!(
+            "version: {}",
+            version_text(&plan.label, plan.payload.version.as_deref())
+        ),
+        format!("id:      {}", plan.id),
+        format!("source:  {}", p.source.location),
+        format!("asset:   {}", plan.artifact.file_name),
+        format!("format:  {} -> {}", plan.payload.format.as_str(), p.backend),
+    ];
+    out.push(match &plan.entry {
+        Some(entry) => format!("entry:   {}", entry.path.display()),
+        None => "entry:   (the file itself)".to_string(),
+    });
     let chosen = plan.entry.as_ref().map(|e| &e.path);
-    for other in plan
-        .payload
-        .entries
-        .iter()
-        .filter(|e| Some(&e.path) != chosen)
-        .take(RUNNER_UPS)
-    {
-        println!("  other: {}", other.path.display());
+    out.extend(
+        plan.payload
+            .entries
+            .iter()
+            .filter(|e| Some(&e.path) != chosen)
+            .take(RUNNER_UPS)
+            .map(|other| format!("  other: {}", other.path.display())),
+    );
+    out.push(format!(
+        "command: {}",
+        p.command.as_deref().unwrap_or("(none)")
+    ));
+    out.push(format!(
+        "desktop: {}",
+        if p.want_desktop { "yes" } else { "no" }
+    ));
+    out.extend(
+        plan.payload
+            .warnings
+            .iter()
+            .map(|w| format!("warning: {w}")),
+    );
+    out.extend(compat_lines(p.compat.as_ref(), p.native_hint.as_deref()));
+    out
+}
+
+fn compat_lines(compat: Option<&Verdict>, native_hint: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(verdict) = compat {
+        out.push(format!("Compatibility: {}", verdict.label()));
+        for finding in verdict.findings() {
+            if finding.note {
+                out.push(format!("  note: {}", finding.detail));
+            } else {
+                out.push(format!("  - {}", finding.detail));
+            }
+        }
     }
-    println!("command: {}", p.command.as_deref().unwrap_or("(none)"));
-    println!("desktop: {}", if p.want_desktop { "yes" } else { "no" });
-    for warning in &plan.payload.warnings {
-        println!("warning: {warning}");
+    if let Some(hint) = native_hint {
+        out.push(format!(
+            "You can also install it system-wide yourself: {hint}"
+        ));
     }
+    out
 }
 
 pub fn print_list(apps: &[AppRecord]) {
@@ -87,7 +126,54 @@ pub fn print_updates(updates: &[UpdateInfo]) {
 
 #[cfg(test)]
 mod tests {
-    use super::version_text;
+    use super::{compat_lines, version_text};
+    use unpakt_core::compat::{Finding, Verdict};
+
+    fn finding(tag: &'static str, detail: &str, note: bool) -> Finding {
+        Finding {
+            tag,
+            detail: detail.into(),
+            note,
+        }
+    }
+
+    #[test]
+    fn summary_shows_risky_findings() {
+        let v = Verdict::Risky(vec![finding(
+            "missing-library",
+            "missing libraries: libfoo.so.1",
+            false,
+        )]);
+        let lines = compat_lines(Some(&v), None);
+        assert!(lines.contains(&"Compatibility: risky".to_string()));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("  - ") && l.contains("libfoo.so.1"))
+        );
+    }
+
+    #[test]
+    fn summary_shows_setuid_note() {
+        let v = Verdict::Ok(vec![finding("setuid", "contains a setuid file", true)]);
+        let lines = compat_lines(Some(&v), None);
+        assert_eq!(lines[0], "Compatibility: ok");
+        assert!(lines.iter().any(|l| l.starts_with("  note: ")));
+    }
+
+    #[test]
+    fn summary_shows_native_hint() {
+        let lines = compat_lines(None, Some("sudo apt install ./a.deb"));
+        assert_eq!(
+            lines,
+            ["You can also install it system-wide yourself: sudo apt install ./a.deb"]
+        );
+    }
+
+    #[test]
+    fn summary_without_package_has_no_compat_line() {
+        assert!(compat_lines(None, None).is_empty());
+    }
 
     #[test]
     fn raw_version_follows_a_different_label() {

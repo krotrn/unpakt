@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine};
-use unpakt_core::model::SourceKind;
+use unpakt_core::model::{FormatKind, SourceKind};
 use unpakt_core::progress::Progress;
 
 const EXIT_ERROR: u8 = 1;
@@ -23,7 +23,7 @@ const EXIT_INTERRUPTED: u8 = 130;
 #[command(
     name = "unpakt",
     version,
-    about = "Install AppImages and tarballs per-user"
+    about = "Install AppImages, tarballs and deb/rpm/pacman packages per-user"
 )]
 struct Cli {
     /// More logging (-v info, -vv debug, -vvv trace); RUST_LOG wins when set
@@ -36,6 +36,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Install a package file, a direct download URL or a GitHub repo
+    #[command(
+        after_long_help = "Exit status 2 means unpakt refused: a compatibility problem or a declined confirmation."
+    )]
     Add {
         input: String,
         /// Install without asking for confirmation
@@ -65,6 +68,12 @@ enum Command {
         /// Regex selecting the release asset to install
         #[arg(long, value_name = "REGEX")]
         pattern: Option<String>,
+        /// Only consider release assets of this format
+        #[arg(long, value_name = "FORMAT", value_parser = parse_format)]
+        format: Option<FormatKind>,
+        /// Install a package even when it may not run on this machine
+        #[arg(long)]
+        allow_risky: bool,
     },
     /// Show what installing a package would do
     Inspect { input: String },
@@ -86,6 +95,9 @@ enum Command {
         /// Only list available updates
         #[arg(long)]
         check: bool,
+        /// Update even when the new version may not run on this machine
+        #[arg(long)]
+        allow_risky: bool,
     },
     /// Switch an app back to its previous version
     Rollback { id: String },
@@ -99,6 +111,10 @@ enum Command {
         #[command(subcommand)]
         action: selfmgmt::SelfAction,
     },
+}
+
+fn parse_format(s: &str) -> Result<FormatKind, String> {
+    s.parse::<FormatKind>().map_err(|e| e.to_string())
 }
 
 /// A refusal to proceed, as opposed to a failure.
@@ -210,6 +226,8 @@ fn run(command: Command) -> Result<()> {
             no_bin,
             force,
             pattern,
+            format,
+            allow_risky,
         } => {
             let desktop = match (desktop, no_desktop) {
                 (true, _) => Some(true),
@@ -224,10 +242,15 @@ fn run(command: Command) -> Result<()> {
                 no_bin,
                 force,
                 pattern,
-                ..AddOpts::default()
+                format,
+                allow_risky,
             };
             let plan = engine.inspect(&input, opts)?;
             output::print_summary(&plan);
+            if let Some(message) = plan.blocked() {
+                engine.discard(plan);
+                return Err(Error::Refused(message).into());
+            }
             if !yes && let Err(e) = confirm("install", "Install?") {
                 engine.discard(plan);
                 return Err(e);
@@ -255,7 +278,11 @@ fn run(command: Command) -> Result<()> {
             engine.remove(&id)?;
             println!("removed {id}");
         }
-        Command::Update { id, check } => {
+        Command::Update {
+            id,
+            check,
+            allow_risky,
+        } => {
             if check {
                 let checkable = match id.as_deref() {
                     Some(id) => {
@@ -286,7 +313,7 @@ fn run(command: Command) -> Result<()> {
                 }
                 report_failed_checks(&found.failed)?;
             } else {
-                update_apps(&mut engine, &interrupt, id.as_deref())?;
+                update_apps(&mut engine, &interrupt, id.as_deref(), allow_risky)?;
             }
         }
         Command::Rollback { id } => {
@@ -310,15 +337,21 @@ fn print_completion(shell: clap_complete::Shell) {
 
 /// Updates one app, or every app that has an update. One app failing does not
 /// stop the others; the run still fails.
-fn update_apps(engine: &mut Engine, interrupt: &Interrupt, id: Option<&str>) -> Result<()> {
+fn update_apps(
+    engine: &mut Engine,
+    interrupt: &Interrupt,
+    id: Option<&str>,
+    allow_risky: bool,
+) -> Result<()> {
     if let Some(id) = id {
         let old = engine.get(id)?.0.current;
         let _armed = interrupt.arm();
-        report_update(id, &old, engine.update(id)?);
+        report_update(id, &old, engine.update_with(id, allow_risky)?);
         return Ok(());
     }
     let check = engine.check_updates(None)?;
     let mut failed = 0;
+    let mut refused = false;
     for app in engine.list()? {
         if let Some((_, e)) = check.failed.iter().find(|(f, _)| *f == app.id) {
             eprintln!("{}: check failed: {e}", app.id);
@@ -333,17 +366,44 @@ fn update_apps(engine: &mut Engine, interrupt: &Interrupt, id: Option<&str>) -> 
         };
         let outcome = {
             let _armed = interrupt.arm();
-            engine.update(&app.id)
+            engine.update_with(&app.id, allow_risky)
         };
         match outcome {
             Ok(new) => report_update(&app.id, &info.current, new),
-            Err(e) => note_update_failure(&app.id, e, &mut failed)?,
+            Err(e) => {
+                refused |= matches!(e, Error::Refused(_));
+                note_update_failure(&app.id, e, &mut failed)?
+            }
         }
     }
-    if failed > 0 {
-        anyhow::bail!("{failed} update(s) failed");
+    match update_failure(failed, refused) {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// An update run that refused any app exits like a refusal, not a failure.
+#[derive(Debug)]
+struct UpdatesRefused(String);
+
+impl std::fmt::Display for UpdatesRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UpdatesRefused {}
+
+fn update_failure(failed: usize, refused: bool) -> Option<anyhow::Error> {
+    if failed == 0 {
+        return None;
+    }
+    let message = format!("{failed} update(s) failed");
+    Some(if refused {
+        UpdatesRefused(message).into()
+    } else {
+        anyhow::anyhow!(message)
+    })
 }
 
 /// Records one app's failed update. An interruption is not a failure to count:
@@ -380,6 +440,7 @@ fn exit_code(err: &anyhow::Error) -> u8 {
         return EXIT_INTERRUPTED;
     }
     let refused = err.is::<NeedsConfirmation>()
+        || err.is::<UpdatesRefused>()
         || matches!(err.downcast_ref::<Error>(), Some(Error::Refused(_)));
     if refused { EXIT_REFUSED } else { EXIT_ERROR }
 }
@@ -418,6 +479,22 @@ mod tests {
         let err = note_update_failure("a", Error::Interrupted, &mut failed).unwrap_err();
         assert_eq!(exit_code(&err), EXIT_INTERRUPTED);
         assert_eq!(failed, 0);
+    }
+
+    #[test]
+    fn refused_updates_exit_with_the_refusal_code() {
+        assert!(update_failure(0, false).is_none());
+        let plain = update_failure(2, false).unwrap();
+        assert_eq!(exit_code(&plain), EXIT_ERROR);
+        let refused = update_failure(2, true).unwrap();
+        assert_eq!(exit_code(&refused), EXIT_REFUSED);
+        assert_eq!(refused.to_string(), "2 update(s) failed");
+    }
+
+    #[test]
+    fn format_flag_accepts_package_formats() {
+        assert_eq!(parse_format("deb"), Ok(FormatKind::Deb));
+        assert!(parse_format("zip").is_err());
     }
 
     #[test]

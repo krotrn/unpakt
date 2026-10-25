@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 
 use crate::format::package::resolve_in_payload;
@@ -230,6 +230,66 @@ fn text_mentions(text: &str, root: &str) -> Option<String> {
     None
 }
 
+/// Substitutes `$NAME` and `${NAME}` in a launcher script with the values of
+/// plain `NAME=value` assignments, so a path built as `/usr/share/$DIR` is seen.
+/// Values that run or expand anything themselves are left alone.
+fn expand_script_vars(text: &str) -> String {
+    let mut vars: HashMap<&str, &str> = HashMap::new();
+    for line in text.lines() {
+        let Some((name, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        if name.is_empty()
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || name.starts_with(|c: char| c.is_ascii_digit())
+        {
+            continue;
+        }
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+        if value.contains(['$', '`', '"', '\'', '\\']) {
+            continue;
+        }
+        vars.insert(name, value);
+    }
+    if vars.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let (name, used) = match after.strip_prefix('{') {
+            Some(inner) => match inner.find('}') {
+                Some(end) => (&inner[..end], end + 2),
+                None => ("", 0),
+            },
+            None => {
+                let end = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(after.len());
+                (&after[..end], end)
+            }
+        };
+        match vars.get(name) {
+            Some(value) if !name.is_empty() => {
+                out.push_str(value);
+                rest = &after[used..];
+            }
+            _ => {
+                out.push('$');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Judges whether `meta`, extracted into the user's home with `entry` as its
 /// launcher, is expected to run on this host. Reads nothing from disk.
 pub fn check(meta: &PackageMeta, entry: &Path, libs: &HostLibs) -> Verdict {
@@ -317,8 +377,8 @@ pub fn check(meta: &PackageMeta, entry: &Path, libs: &HostLibs) -> Verdict {
                 );
             }
         }
-        if let Some(text) = meta.entry_script.as_deref()
-            && let Some(p) = roots.iter().find_map(|r| text_mentions(text, r))
+        if let Some(text) = meta.entry_script.as_deref().map(expand_script_vars)
+            && let Some(p) = roots.iter().find_map(|r| text_mentions(&text, r))
         {
             push(
                 "hardcoded-path",
@@ -586,6 +646,30 @@ mod tests {
         let v = check(&m, Path::new("usr/bin/code"), &host(&[], &[], true));
         assert!(matches!(v, Verdict::Risky(_)));
         assert_eq!(v.findings()[0].tag, "hardcoded-path");
+    }
+
+    #[test]
+    fn hardcoded_path_built_from_script_variables_is_risky() {
+        let mut m = meta(&["usr/bin/discord", "usr/share/discord/updater"], vec![]);
+        m.entry_script = Some(
+            "#!/bin/sh\nSUFFIX=discord/updater\nbootstrap=/usr/share/$SUFFIX\n\"${bootstrap}\"\n"
+                .into(),
+        );
+        let v = check(&m, Path::new("usr/bin/discord"), &host(&[], &[], true));
+        assert!(matches!(v, Verdict::Risky(_)));
+        assert_eq!(
+            v.findings()[0].detail,
+            "usr/bin/discord refers to /usr/share/discord/updater"
+        );
+    }
+
+    #[test]
+    fn script_variables_expand_only_from_literal_assignments() {
+        let text = "A=one\nB=\"two words\"\nC=$(cmd)\nD=${A}/x\necho $A ${B} $C $D $AB\n";
+        assert_eq!(
+            expand_script_vars(text).lines().last(),
+            Some("echo one two words $C $D $AB")
+        );
     }
 
     #[test]

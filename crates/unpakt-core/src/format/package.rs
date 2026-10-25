@@ -21,6 +21,7 @@ const MAX_ICON_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SCRIPT_BYTES: u64 = 256 * 1024;
 const MAX_KEPT_SCRIPT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_KEPT_ICON_BYTES: usize = 64 * 1024 * 1024;
+const MAX_KEPT_LOOSE_DESKTOP_BYTES: usize = 1024 * 1024;
 const HEAD_BYTES: u64 = 512;
 const MAX_LINK_HOPS: usize = 40;
 
@@ -43,9 +44,15 @@ struct Scan {
     desktops: BTreeMap<PathBuf, String>,
     icons: BTreeMap<PathBuf, Vec<u8>>,
     scripts: BTreeMap<PathBuf, String>,
+    /// Desktop files and package-named icons outside the standard folders,
+    /// kept in case a link in a standard folder points at them.
+    loose_desktops: BTreeMap<PathBuf, String>,
+    loose_icons: BTreeMap<PathBuf, Vec<u8>>,
+    package_name: String,
     warnings: Vec<String>,
     kept_scripts: usize,
     kept_icons: usize,
+    kept_loose_desktops: usize,
 }
 
 fn host_name(arch: &Arch) -> &str {
@@ -73,7 +80,7 @@ pub(crate) fn inspect_package(a: &Artifact, h: Header, host_arch: &Arch) -> Resu
         scripts,
         mut warnings,
         ..
-    } = scan(&h.data)?;
+    } = scan(&h.data, &h.name)?;
 
     let mut desktop_entry = None;
     let mut desktop = None;
@@ -314,8 +321,11 @@ fn read_more(reader: &mut dyn Read, limit: u64, buf: &mut Vec<u8>) -> Result<boo
     Ok(buf.len() as u64 <= limit)
 }
 
-fn scan(data: &DataSource) -> Result<Scan> {
-    let mut s = Scan::default();
+fn scan(data: &DataSource, package_name: &str) -> Result<Scan> {
+    let mut s = Scan {
+        package_name: package_name.to_string(),
+        ..Scan::default()
+    };
     let mut seen: HashMap<PathBuf, usize> = HashMap::new();
     for_each_entry(data, |entry| {
         let path = entry.path;
@@ -377,7 +387,40 @@ fn scan(data: &DataSource) -> Result<Scan> {
         s.records.push(Record { path, kind });
         Ok(())
     })?;
+    adopt_linked(&mut s);
     Ok(s)
+}
+
+/// Fills in desktop files and icons that the standard folders only hold as
+/// links, such as `usr/share/applications/x.desktop -> ../x/x.desktop`.
+fn adopt_linked(s: &mut Scan) {
+    for link in s.index.links.keys() {
+        if is_desktop_file(link) && !s.desktops.contains_key(link) {
+            let text = resolve_in_payload(&s.index, link)
+                .and_then(|t| s.desktops.get(&t).or_else(|| s.loose_desktops.get(&t)))
+                .cloned();
+            if let Some(text) = text {
+                s.desktops.insert(link.clone(), text);
+            }
+        } else if is_icon_file(link) && !s.icons.contains_key(link) {
+            let data = resolve_in_payload(&s.index, link)
+                .and_then(|t| s.icons.get(&t).or_else(|| s.loose_icons.get(&t)))
+                .cloned();
+            if let Some(data) = data {
+                s.icons.insert(link.clone(), data);
+            }
+        }
+    }
+}
+
+fn is_loose_desktop(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "desktop")
+}
+
+fn is_loose_icon(path: &Path, package_name: &str) -> bool {
+    !package_name.is_empty()
+        && icon_ext(path).is_some()
+        && path.file_stem().is_some_and(|s| s == package_name)
 }
 
 /// Reads what the inspector needs from one regular file and returns its first
@@ -412,6 +455,23 @@ fn read_file(s: &mut Scan, path: &Path, reader: &mut dyn Read) -> Result<Vec<u8>
         } else if s.kept_icons + buf.len() <= MAX_KEPT_ICON_BYTES {
             s.kept_icons += buf.len();
             s.icons.insert(path.to_path_buf(), buf);
+        }
+    } else if is_loose_desktop(path) {
+        if read_more(reader, MAX_DESKTOP_BYTES, &mut buf)?
+            && s.kept_loose_desktops + buf.len() <= MAX_KEPT_LOOSE_DESKTOP_BYTES
+        {
+            s.kept_loose_desktops += buf.len();
+            s.loose_desktops.insert(
+                path.to_path_buf(),
+                String::from_utf8_lossy(&buf).into_owned(),
+            );
+        }
+    } else if is_loose_icon(path, &s.package_name) {
+        if read_more(reader, MAX_ICON_BYTES, &mut buf)?
+            && s.kept_icons + buf.len() <= MAX_KEPT_ICON_BYTES
+        {
+            s.kept_icons += buf.len();
+            s.loose_icons.insert(path.to_path_buf(), buf);
         }
     } else if buf.starts_with(b"#!")
         && read_more(reader, MAX_SCRIPT_BYTES, &mut buf)?

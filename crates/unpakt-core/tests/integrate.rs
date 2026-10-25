@@ -59,7 +59,7 @@ fn writes_valid_desktop_and_icon() {
     r.icon = Some(&icon);
     r.no_fuse_appimage = true;
     r.desktop_src = Some(
-        "[Desktop Entry]\nName=Orig\nExec=orig --flag %U\nTryExec=orig\nDBusActivatable=true\nIcon=orig\n",
+        "[Desktop Entry]\nName=Orig\nExec=orig --flag %U\nTryExec=orig\nPath=/opt/orig\nDBusActivatable=true\nIcon=orig\n",
     );
     let mut txn = Txn::new();
     let out = integrate(&layout, &r, &mut txn).unwrap();
@@ -77,6 +77,7 @@ fn writes_valid_desktop_and_icon() {
     );
     assert!(text.contains(" %U"));
     assert!(!text.contains("TryExec") && !text.contains("DBusActivatable"));
+    assert!(!text.contains("Path="));
     assert_eq!(
         fs::metadata(&desktop).unwrap().permissions().mode() & 0o777,
         0o644

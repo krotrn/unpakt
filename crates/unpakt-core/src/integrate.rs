@@ -129,6 +129,8 @@ fn build_desktop(req: &IntegrateReq, has_icon: bool, warnings: &mut Vec<String>)
     entry.set("X-Unpakt-Id", req.id);
     entry.remove("DBusActivatable");
     entry.remove("TryExec");
+    // A working folder from the original layout does not exist after install.
+    entry.remove("Path");
     entry
 }
 

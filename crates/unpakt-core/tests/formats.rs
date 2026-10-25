@@ -457,6 +457,38 @@ fn deb_desktop_skips_nodisplay_when_no_name_matches() {
 }
 
 #[test]
+fn deb_desktop_and_icon_reached_through_links() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let desktop =
+        b"[Desktop Entry]\nType=Application\nName=Discord\nExec=/usr/bin/discord\nIcon=discord\n";
+    // The links come first, so the targets are not known yet when they are read.
+    let data = [
+        E::Link(
+            "usr/share/applications/discord.desktop",
+            "../discord/discord.desktop",
+        ),
+        E::Link("usr/share/pixmaps/discord.png", "../discord/discord.png"),
+        E::File("usr/bin/discord", &elf, 0o755),
+        E::File("usr/share/discord/discord.desktop", desktop, 0o644),
+        E::File(
+            "usr/share/discord/discord.png",
+            b"\x89PNG\r\n\x1a\nicon",
+            0o644,
+        ),
+    ];
+    let control = format!(
+        "Package: discord\nVersion: 1\nArchitecture: {}\n",
+        host_package_arch()
+    );
+    let path = build_deb(tmp.path(), "discord.deb", &control, &[], &data);
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.name, "Discord");
+    assert!(p.desktop.is_some());
+    assert_eq!(p.icon.unwrap().data, b"\x89PNG\r\n\x1a\nicon");
+}
+
+#[test]
 fn deb_foreign_arch_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let path = build_deb(tmp.path(), "a.deb", &control(foreign_arch()), &[], &[]);

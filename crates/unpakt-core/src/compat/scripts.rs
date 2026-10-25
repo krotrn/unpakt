@@ -92,20 +92,26 @@ const LEADING: [&str; 9] = [
     "if", "then", "else", "!", "elif", "while", "do", "exec", "sudo",
 ];
 
-pub(crate) fn assess(text: &str, index: &PayloadIndex) -> Option<ScriptIssue> {
+pub(crate) fn assess(text: &str, index: &PayloadIndex) -> Vec<ScriptIssue> {
     let lines = unrecognized_lines(text, index);
-    let first = lines.first()?.clone();
+    let mut issues = Vec::new();
     if let Some(line) = lines.iter().find(|l| {
         simple_commands(l)
             .iter()
             .any(|c| SYSTEM_COMMANDS.contains(&c.as_str()))
     }) {
-        return Some(ScriptIssue::System(line.clone()));
+        issues.push(ScriptIssue::System(line.clone()));
     }
-    if let Some(line) = lines.iter().find(|l| sets_setuid(l)) {
-        return Some(ScriptIssue::Setuid(line.clone()));
+    let setuid = lines.iter().find(|l| sets_setuid(l));
+    if let Some(line) = setuid {
+        issues.push(ScriptIssue::Setuid(line.clone()));
     }
-    Some(ScriptIssue::Other(first))
+    if !issues.iter().any(|i| matches!(i, ScriptIssue::System(_)))
+        && let Some(line) = lines.iter().find(|l| !sets_setuid(l))
+    {
+        issues.push(ScriptIssue::Other(line.clone()));
+    }
+    issues
 }
 
 /// First word of each simple command on the line.
@@ -332,22 +338,26 @@ mod tests {
     fn assess_classifies() {
         let i = none();
         assert!(matches!(
-            assess("ldconfig; useradd foo", &i),
-            Some(ScriptIssue::System(_))
+            assess("ldconfig; useradd foo", &i)[..],
+            [ScriptIssue::System(_)]
         ));
         assert!(matches!(
-            assess("if ! getent passwd x; then\n  sudo adduser x\nfi", &i),
-            Some(ScriptIssue::System(_))
+            assess("if ! getent passwd x; then\n  sudo adduser x\nfi", &i)[..],
+            [ScriptIssue::System(_)]
         ));
         assert!(matches!(
-            assess("FOO=1 chmod u+s /opt/x/sb || true", &i),
-            Some(ScriptIssue::Setuid(_))
+            assess("FOO=1 chmod u+s /opt/x/sb || true", &i)[..],
+            [ScriptIssue::Setuid(_)]
         ));
         assert!(matches!(
-            assess("chmod 0755 /opt/x/sb", &i),
-            Some(ScriptIssue::Other(_))
+            assess("chmod 0755 /opt/x/sb", &i)[..],
+            [ScriptIssue::Other(_)]
         ));
-        assert_eq!(assess("ldconfig\n", &i), None);
+        assert!(assess("ldconfig\n", &i).is_empty());
+        assert!(matches!(
+            assess("chmod 4755 /x\nfoo bar", &i)[..],
+            [ScriptIssue::Setuid(_), ScriptIssue::Other(_)]
+        ));
     }
 
     #[test]

@@ -364,21 +364,22 @@ pub fn check(meta: &PackageMeta, entry: &Path, libs: &HostLibs) -> Verdict {
 
     for script in &meta.scripts {
         let name = &script.name;
-        match scripts::assess(&script.text, &meta.index) {
-            None => {}
-            Some(scripts::ScriptIssue::System(line)) => {
-                push("maintainer-script", format!("{name}: {line}"), false);
+        for issue in scripts::assess(&script.text, &meta.index) {
+            match issue {
+                scripts::ScriptIssue::System(line) => {
+                    push("maintainer-script", format!("{name}: {line}"), false);
+                }
+                scripts::ScriptIssue::Setuid(line) => push(
+                    "setuid",
+                    format!("{name} would set the setuid bit ({line}); it is not set"),
+                    libs.userns(),
+                ),
+                scripts::ScriptIssue::Other(line) => push(
+                    "maintainer-script",
+                    format!("{name} was not run; first unrecognized line: {line}"),
+                    true,
+                ),
             }
-            Some(scripts::ScriptIssue::Setuid(line)) => push(
-                "setuid",
-                format!("{name} would set the setuid bit ({line}); it is not set"),
-                libs.userns(),
-            ),
-            Some(scripts::ScriptIssue::Other(line)) => push(
-                "maintainer-script",
-                format!("{name} was not run; first unrecognized line: {line}"),
-                true,
-            ),
         }
     }
 

@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Install `.deb`, `.rpm` and pacman packages for your user, from a file, a URL
+  or a GitHub release. The package is unpacked into your home directory; its
+  install scripts are never run.
+- A compatibility check for packages: `inspect`, `add` and `update` report
+  `ok` (expected to run), `risky` or `needs-container`. A risky package is
+  refused with exit status 2 unless you pass `--allow-risky`; the reasons you
+  accepted are remembered per app. `needs-container` cannot be overridden.
+- `unpakt add --format appimage|tarball|deb|rpm|pacman` limits the release
+  assets considered, and `--allow-risky` on `add` and `update`.
+- The desktop app shows the verdict in the install review and asks for
+  confirmation before a risky install.
+- File managers offer unpakt for `.deb`, `.rpm` and pacman packages (package
+  MIME types in the launcher entry).
+
+### Changed
+
+- `update` keeps the format an app was installed in, and stops when a new
+  version has a risk reason you have not accepted.
+
 ## [0.1.3] - 2026-10-24
 
 ### Added

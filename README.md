@@ -1,7 +1,7 @@
 # unpakt
 
-unpakt installs portable Linux apps (AppImages and tarballs) for your user
-account, from a local file, a download URL or a GitHub repository. It gives
+unpakt installs portable Linux apps (AppImages, tarballs and deb, rpm and
+pacman packages) for your user account, from a local file, a download URL or a GitHub repository. It gives
 each app a launcher entry and, if you want, a command on your `PATH`, keeps
 the previous versions so you can roll back, and updates apps when you ask it
 to. It never needs root and never writes outside your home directory.
@@ -11,7 +11,11 @@ Use it from the terminal (`unpakt`) or from the GTK 4 / libadwaita app
 
 ## Features
 
-- Install an AppImage or a tarball from a file, a URL or a GitHub repo.
+- Install an AppImage, a tarball or a `.deb`, `.rpm` or pacman package from a
+  file, a URL or a GitHub repo. Packages are unpacked into your home directory;
+  nothing is installed system-wide and no install script is run.
+- A [compatibility check](#compatibility-check) tells you whether a package is
+  expected to run on this machine before it is installed.
 - Launcher entry with the app's own icon, and a command in `~/.local/bin`.
 - `inspect` shows what an install would do before anything is changed.
 - `update` fetches the latest release; `rollback` goes back one version
@@ -164,13 +168,16 @@ From a download URL, or from a file you already have:
 ```sh
 unpakt add https://example.com/downloads/App-1.2.3-x86_64.AppImage
 unpakt add ~/Downloads/App-1.2.3-x86_64.AppImage
+unpakt add ~/Downloads/app_1.2.3_amd64.deb
 ```
 
 `add` shows what it is about to do and asks `Install? [y/N]`. Pass `--yes` to
 skip the question (needed when there is no terminal). Useful options:
 `--id`, `--command` (name of the command on `PATH`), `--no-bin`, `--desktop` /
 `--no-desktop`, `--entry` (the executable inside a tarball), `--pattern REGEX`
-(choose a release asset by name) and `--force` (replace files unpakt does not
+(choose a release asset by name), `--format appimage|tarball|deb|rpm|pacman`
+(only consider release assets of that format), `--allow-risky` (see
+[Compatibility check](#compatibility-check)) and `--force` (replace files unpakt does not
 own).
 
 Look first, change nothing:
@@ -196,7 +203,9 @@ unpakt rollback <id>     # switch back to the previous version
 unpakt remove <id>       # remove the app and its files
 ```
 
-Apps installed from a local file have no update source, so `update` skips
+`update` keeps the format an app was installed in: an app installed from a
+`.deb` is updated from a `.deb`, even when the release also has an AppImage.
+`unpakt update` also takes `--allow-risky`. Apps installed from a local file have no update source, so `update` skips
 them. Check the installation:
 
 ```sh
@@ -208,6 +217,36 @@ unpakt doctor
 ```sh
 unpakt -vv add https://github.com/owner/repo
 ```
+
+### Compatibility check
+
+Packages are built for a distribution, not for your machine. Before a package is
+installed, unpakt unpacks it into a scratch directory, reads its files and
+reports a verdict:
+
+- `ok`: the package is expected to run here. This is not a statement about
+  whether the package is trustworthy; unpakt does not check who made it. Any
+  notes (for example, that a file is setuid and will not be on your machine)
+  are shown but do not change the verdict.
+- `risky`: something may stop it from running, such as a library it needs that
+  is missing or older than required, a hardcoded system path that will not
+  exist, files that belong in system directories (services, udev rules, kernel
+  modules), or an install script that sets up accounts or kernel settings.
+  `add` and `update` refuse a risky package with exit status 2. Pass
+  `--allow-risky` to install it anyway; the reasons you accepted are remembered
+  for that app, and a later update stops again only when a new reason appears.
+- `needs-container`: the package depends on the host in a way that a per-user
+  install cannot provide. There is no override.
+
+`unpakt inspect <file>` prints the verdict without installing anything.
+
+Install scripts (`postinst`, `%post`, `.INSTALL`) are never run. unpakt reads
+them as text. Lines it does not recognise are shown as notes, and only
+account and kernel setup commands (`useradd`, `sysctl`, `modprobe`, and the
+like) make a package risky. A package that needs its script to do something
+beyond that will not have had it done.
+
+Installing system-wide, through the package manager, comes in a later release.
 
 ### Where files go
 
@@ -262,8 +301,8 @@ command.
 **`conflict: ... already exists and is not managed by unpakt`.** unpakt will not
 overwrite files it did not create. Move the file away, or pass `--force`.
 
-**`no release asset matches this host`.** The release has no AppImage or
-tarball for x86_64 Linux (unpakt skips other systems and architectures,
+**`no release asset matches this host`.** The release has no AppImage,
+tarball or package for x86_64 Linux (unpakt skips other systems and architectures,
 checksums and signatures). The message lists the asset names it saw. If one of
 them is right but scores lower than another, select it with `--pattern`:
 
@@ -289,11 +328,15 @@ changes things at a time (the CLI and the GUI share one lock). The command
 waits and then continues. If nothing else is running, check for a stuck
 `unpakt` process. The lock is released automatically when a process dies.
 
+**A package is refused as risky (exit status 2).** Read the reasons that
+`add` or `inspect` prints. If you accept them, run again with `--allow-risky`.
+A `needs-container` package cannot be installed.
+
 **`refusing to install without confirmation; pass --yes`.** `add` and `remove`
 ask on the terminal; without one they refuse unless you pass `--yes`.
 
-**`unsupported: ... package`.** unpakt installs AppImages and tarballs only. A
-`.deb`, `.rpm`, `.zip` or a bare executable is refused.
+**`unsupported: ...`.** unpakt installs AppImages, tarballs and deb, rpm and
+pacman packages. A `.zip` or a bare executable is refused.
 
 ## FAQ
 
@@ -331,8 +374,8 @@ Short and incomplete; each tool has its strengths.
 
 | Tool | What it is | How unpakt differs |
 | --- | --- | --- |
-| AppImageLauncher | Integrates AppImages into the desktop when you open them | unpakt is a command-line-first installer with updates from GitHub releases and rollback; it also installs tarballs |
-| Gear Lever | GUI manager for AppImages | unpakt has a CLI as well as a GUI, and installs tarballs |
+| AppImageLauncher | Integrates AppImages into the desktop when you open them | unpakt is a command-line-first installer with updates from GitHub releases and rollback; it also installs tarballs and packages |
+| Gear Lever | GUI manager for AppImages | unpakt has a CLI as well as a GUI, and installs tarballs and packages |
 | AM / appman | A large script-based catalogue of portable apps | unpakt has no catalogue: you point it at a repo, URL or file |
 | eget, bin | Download a release binary from GitHub | unpakt also creates launcher entries and icons, keeps versions and can roll back |
 

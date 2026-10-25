@@ -6,6 +6,7 @@ use common::{
 };
 use std::path::Path;
 use unpakt_core::Error;
+use unpakt_core::cancel::Cancel;
 use unpakt_core::format::detect;
 use unpakt_core::model::{Artifact, ExecKind, FormatKind, Payload};
 
@@ -26,7 +27,7 @@ fn artifact(path: &Path) -> Artifact {
 
 fn inspect(path: &Path) -> unpakt_core::Result<Payload> {
     let a = artifact(path);
-    detect(&a)?.inspect(&a)
+    detect(&a)?.inspect(&a, &Cancel::new())
 }
 
 fn nvim_entries() -> Vec<E<'static>> {
@@ -486,6 +487,22 @@ fn deb_desktop_and_icon_reached_through_links() {
     assert_eq!(p.name, "Discord");
     assert!(p.desktop.is_some());
     assert_eq!(p.icon.unwrap().data, b"\x89PNG\r\n\x1a\nicon");
+}
+
+#[test]
+fn cancelled_package_inspect_stops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = electron_like_with(tmp.path(), FormatKind::Deb, "");
+    let a = Artifact {
+        file_name: "foo.deb".into(),
+        path,
+    };
+    let cancel = Cancel::new();
+    cancel.cancel();
+    assert!(matches!(
+        detect(&a).unwrap().inspect(&a, &cancel),
+        Err(Error::Interrupted)
+    ));
 }
 
 #[test]

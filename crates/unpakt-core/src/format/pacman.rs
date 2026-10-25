@@ -3,6 +3,7 @@ use std::io::Read;
 use super::package::{Header, inspect_package};
 use super::stream::{DataSource, normalize};
 use super::{Confidence, FormatPlugin, open_tar};
+use crate::cancel::Cancel;
 use crate::error::{Error, Result};
 use crate::model::{Arch, Artifact, FormatKind, PackageFamily, Payload, Script};
 
@@ -52,7 +53,7 @@ impl FormatPlugin for Pacman {
         Ok(Confidence::No)
     }
 
-    fn inspect(&self, a: &Artifact) -> Result<Payload> {
+    fn inspect(&self, a: &Artifact, cancel: &Cancel) -> Result<Payload> {
         let bad = |e: std::io::Error| Error::Parse(format!("invalid pacman package: {e}"));
         let mut archive = open_tar(&a.path)?;
         let mut pkginfo = None;
@@ -121,7 +122,7 @@ impl FormatPlugin for Pacman {
                 skip: SKIP.iter().map(|s| s.to_string()).collect(),
             },
         };
-        inspect_package(a, header, &Arch::current())
+        inspect_package(a, header, &Arch::current(), cancel)
     }
 }
 

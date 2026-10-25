@@ -7,6 +7,7 @@ use backhand::{FilesystemReader, InnerNode, Node, SquashfsFileReader};
 use goblin::elf::Elf;
 
 use super::{Confidence, FormatPlugin, read_head};
+use crate::cancel::Cancel;
 use crate::desktop::DesktopEntry;
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Artifact, FormatKind, Icon, Payload};
@@ -58,7 +59,8 @@ impl FormatPlugin for AppImage {
         })
     }
 
-    fn inspect(&self, a: &Artifact) -> Result<Payload> {
+    fn inspect(&self, a: &Artifact, cancel: &Cancel) -> Result<Payload> {
+        cancel.check()?;
         let (file_name_app, file_version) = parse_file_name(&a.file_name);
         let head = read_head(&a.path, TYPE_MARKER_AT + 3)?;
         let degraded = |reason: &str| Payload {

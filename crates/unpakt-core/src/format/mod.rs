@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
+use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 use crate::model::{Artifact, FormatKind, Payload};
 
@@ -30,7 +31,9 @@ pub enum Confidence {
 pub trait FormatPlugin: Sync {
     fn kind(&self) -> FormatKind;
     fn sniff(&self, a: &Artifact) -> Result<Confidence>;
-    fn inspect(&self, a: &Artifact) -> Result<Payload>;
+    /// Reads what an install needs from `a`. Stops with `Error::Interrupted`
+    /// soon after `cancel` is set.
+    fn inspect(&self, a: &Artifact, cancel: &Cancel) -> Result<Payload>;
 }
 
 static DEB: deb::Deb = deb::Deb;

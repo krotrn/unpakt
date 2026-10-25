@@ -18,7 +18,8 @@ All notable changes to this project are documented here. The format follows
 - `unpakt add --format appimage|tarball|deb|rpm|pacman` limits the release
   assets considered, and `--allow-risky` on `add` and `update`.
 - The desktop app shows the verdict in the install review and asks for
-  confirmation before a risky install.
+  confirmation before a risky install, and offers Update anyway when an update
+  brings a new risk.
 - File managers offer unpakt for `.deb`, `.rpm` and pacman packages (package
   MIME types in the launcher entry).
 
@@ -26,6 +27,10 @@ All notable changes to this project are documented here. The format follows
 
 - `update` keeps the format an app was installed in, and stops when a new
   version has a risk reason you have not accepted.
+- Inspecting large packages is several times faster: xz payloads are decoded
+  on several threads. Cancel now stops an inspect that is in progress.
+- Desktop entries no longer keep a `Path=` working folder from the original
+  layout, which could stop an app from starting.
 
 ## [0.1.3] - 2026-10-24
 

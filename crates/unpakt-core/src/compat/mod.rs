@@ -28,6 +28,8 @@ const SYSTEM_PREFIXES: [&str; 9] = [
 pub struct Finding {
     pub tag: &'static str,
     pub detail: String,
+    /// A note does not make the verdict risky.
+    pub note: bool,
 }
 
 /// Whether an extracted package is expected to run on this host. In `Ok` the
@@ -103,13 +105,68 @@ impl Lookup {
 }
 
 fn exec_target(script: &str) -> Option<PathBuf> {
-    let (_, rest) = script.split_once("exec ")?;
-    let token = rest
-        .split_whitespace()
-        .map(|t| t.trim_matches(|c| c == '"' || c == '\'' || c == ';'))
-        .find(|t| t.starts_with('/'))?;
-    Some(PathBuf::from(token.trim_start_matches('/')))
+    script
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.strip_prefix("exec ").or((l == "exec").then_some("")))
+        .find_map(|rest| {
+            rest.split_whitespace()
+                .map(|t| t.trim_matches(|c| c == '"' || c == '\'' || c == ';'))
+                .find(|t| t.starts_with('/'))
+                .map(|t| PathBuf::from(t.trim_start_matches('/')))
+        })
 }
+
+const SHARED_SHARE: [&str; 27] = [
+    "applications",
+    "icons",
+    "pixmaps",
+    "mime",
+    "locale",
+    "doc",
+    "man",
+    "info",
+    "metainfo",
+    "appdata",
+    "licenses",
+    "fonts",
+    "themes",
+    "sounds",
+    "help",
+    "dbus-1",
+    "glib-2.0",
+    "polkit-1",
+    "bash-completion",
+    "zsh",
+    "fish",
+    "gnome-shell",
+    "X11",
+    "menu",
+    "lintian",
+    "gtk-doc",
+    "thumbnailers",
+];
+
+const SHARED_LIB: [&str; 17] = [
+    "x86_64-linux-gnu",
+    "aarch64-linux-gnu",
+    "systemd",
+    "udev",
+    "sysusers.d",
+    "tmpfiles.d",
+    "modules",
+    "girepository-1.0",
+    "gtk-3.0",
+    "gtk-4.0",
+    "debug",
+    "mime",
+    "binfmt.d",
+    "environment.d",
+    "sysctl.d",
+    "modules-load.d",
+    "pkgconfig",
+];
 
 fn install_roots(meta: &PackageMeta) -> Vec<String> {
     meta.index
@@ -120,9 +177,13 @@ fn install_roots(meta: &PackageMeta) -> Vec<String> {
             let first = comps.first().and_then(|c| c.as_os_str().to_str());
             match first {
                 Some("opt") => comps.len() == 2,
-                Some("usr") => {
-                    comps.len() == 3
-                        && matches!(comps[1].as_os_str().to_str(), Some("share") | Some("lib"))
+                Some("usr") if comps.len() == 3 => {
+                    let leaf = comps[2].as_os_str().to_str().unwrap_or("");
+                    match comps[1].as_os_str().to_str() {
+                        Some("share") => !SHARED_SHARE.contains(&leaf),
+                        Some("lib") => !SHARED_LIB.contains(&leaf),
+                        _ => false,
+                    }
                 }
                 _ => false,
             }
@@ -166,8 +227,9 @@ pub fn check(meta: &PackageMeta, entry: &Path, libs: &HostLibs) -> Verdict {
     let lookup = Lookup::new(meta);
 
     let mut starts: Vec<PathBuf> = Vec::new();
-    if meta.elf.contains_key(entry) {
-        starts.push(entry.to_path_buf());
+    let entry_file = resolve_in_payload(&meta.index, entry).unwrap_or_else(|| entry.to_path_buf());
+    if meta.elf.contains_key(&entry_file) {
+        starts.push(entry_file);
     }
     if let Some(target) = meta.entry_script.as_deref().and_then(exec_target)
         && let Some(resolved) = resolve_in_payload(&meta.index, &target)
@@ -213,9 +275,9 @@ pub fn check(meta: &PackageMeta, entry: &Path, libs: &HostLibs) -> Verdict {
         }
     }
 
-    let mut findings: Vec<(Finding, bool)> = Vec::new();
+    let mut findings: Vec<Finding> = Vec::new();
     let mut push = |tag: &'static str, detail: String, note: bool| {
-        findings.push((Finding { tag, detail }, note));
+        findings.push(Finding { tag, detail, note });
     };
 
     if !missing.is_empty() {
@@ -301,23 +363,31 @@ pub fn check(meta: &PackageMeta, entry: &Path, libs: &HostLibs) -> Verdict {
     }
 
     for script in &meta.scripts {
-        if let Some(line) = scripts::unrecognized_line(&script.text, &meta.index) {
-            push(
+        let name = &script.name;
+        match scripts::assess(&script.text, &meta.index) {
+            None => {}
+            Some(scripts::ScriptIssue::System(line)) => {
+                push("maintainer-script", format!("{name}: {line}"), false);
+            }
+            Some(scripts::ScriptIssue::Setuid(line)) => push(
+                "setuid",
+                format!("{name} would set the setuid bit ({line}); it is not set"),
+                libs.userns(),
+            ),
+            Some(scripts::ScriptIssue::Other(line)) => push(
                 "maintainer-script",
-                format!("{}: {line}", script.name),
-                false,
-            );
+                format!("{name} was not run; first unrecognized line: {line}"),
+                true,
+            ),
         }
     }
 
-    let any_problem = findings.iter().any(|(_, note)| !note);
-    let all: Vec<Finding> = findings.into_iter().map(|(f, _)| f).collect();
     if has_too_new {
-        Verdict::NeedsContainer(all)
-    } else if any_problem {
-        Verdict::Risky(all)
+        Verdict::NeedsContainer(findings)
+    } else if findings.iter().any(|f| !f.note) {
+        Verdict::Risky(findings)
     } else {
-        Verdict::Ok(all)
+        Verdict::Ok(findings)
     }
 }
 
@@ -554,7 +624,124 @@ mod tests {
             text: "useradd foo\n".into(),
         });
         let v = check(&m, Path::new(FOO), &host(&[], &[], true));
+        assert!(matches!(v, Verdict::Risky(_)));
         assert_eq!(v.findings()[0].detail, "postinst: useradd foo");
+    }
+
+    const OBSIDIAN: &str = include_str!("obsidian_postinst.txt");
+
+    fn electron(userns: bool, script: &str) -> Verdict {
+        let mut m = meta(
+            &[FOO, "opt/Foo/chrome-sandbox"],
+            vec![(FOO, facts(&[], &[]))],
+        );
+        m.index.setuid.push("opt/Foo/chrome-sandbox".into());
+        m.scripts.push(Script {
+            name: "postinst".into(),
+            text: script.into(),
+        });
+        check(&m, Path::new(FOO), &host(&[], &[], userns))
+    }
+
+    fn with_script(script: &str) -> Verdict {
+        let mut m = simple(&[]);
+        m.scripts.push(Script {
+            name: "postinst".into(),
+            text: script.into(),
+        });
+        check(&m, Path::new(FOO), &host(&[], &[], true))
+    }
+
+    #[test]
+    fn real_electron_postinst_is_ok_with_notes_when_userns() {
+        match electron(true, OBSIDIAN) {
+            Verdict::Ok(v) => {
+                assert!(v.iter().all(|f| f.note), "{v:?}");
+                assert!(
+                    v.iter()
+                        .any(|f| f.tag == "setuid" && f.detail.starts_with("postinst"))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn real_electron_postinst_is_risky_without_userns() {
+        let v = electron(false, OBSIDIAN);
+        assert!(matches!(v, Verdict::Risky(_)));
+        assert!(v.findings().iter().any(|f| f.tag == "setuid" && !f.note));
+    }
+
+    #[test]
+    fn compound_line_hiding_useradd_is_risky() {
+        assert!(matches!(
+            with_script("ldconfig; useradd foo"),
+            Verdict::Risky(_)
+        ));
+        assert!(matches!(
+            with_script("#!/bin/sh\nuseradd foo\n"),
+            Verdict::Risky(_)
+        ));
+    }
+
+    #[test]
+    fn plain_unrecognized_scripts_only_add_notes() {
+        for text in [
+            "echo deb http://x > /etc/apt/sources.list.d/x.list",
+            "systemctl reload apparmor\npkill -f Discord\nrm -rf \"$HOME/.config/discord/Cache\"\n",
+        ] {
+            match with_script(text) {
+                Verdict::Ok(v) => {
+                    assert!(v.iter().all(|f| f.note && f.tag == "maintainer-script"));
+                    assert_eq!(v.len(), 1);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn shared_dirs_are_not_install_roots() {
+        let mut ef = facts(&[], &[]);
+        ef.abs_paths.insert("/usr/share/locale".into());
+        let mut m = meta(&["usr/bin/pavucontrol", "usr/share/locale/de/x.mo"], vec![]);
+        m.elf.insert("usr/bin/pavucontrol".into(), ef);
+        let libs = host(&[], &[], true);
+        assert!(matches!(
+            check(&m, Path::new("usr/bin/pavucontrol"), &libs),
+            Verdict::Ok(_)
+        ));
+
+        let mut ef = facts(&[], &[]);
+        ef.abs_paths.insert("/usr/share/pavucontrol".into());
+        let mut m = meta(
+            &["usr/bin/pavucontrol", "usr/share/pavucontrol/x.glade"],
+            vec![],
+        );
+        m.elf.insert("usr/bin/pavucontrol".into(), ef);
+        let v = check(&m, Path::new("usr/bin/pavucontrol"), &libs);
+        assert!(matches!(v, Verdict::Risky(_)));
+        assert_eq!(v.findings()[0].tag, "hardcoded-path");
+    }
+
+    #[test]
+    fn entry_symlink_to_the_binary_is_followed() {
+        let mut m = simple(&["libnope.so.1"]);
+        m.index
+            .links
+            .insert("usr/bin/foo".into(), "/opt/Foo/foo".into());
+        let v = check(&m, Path::new("usr/bin/foo"), &host(&[], &[], true));
+        assert!(v.findings()[0].detail.contains("libnope.so.1"));
+    }
+
+    #[test]
+    fn exec_target_ignores_comments_and_mid_line_exec() {
+        assert_eq!(exec_target("# exec /opt/a/b\necho exec /opt/c/d\n"), None);
+        assert_eq!(
+            exec_target("#!/bin/sh\nexec /opt/Foo/foo --x /opt/other\n"),
+            Some(PathBuf::from("opt/Foo/foo"))
+        );
     }
 
     #[test]
@@ -562,6 +749,7 @@ mod tests {
         let f = |tag| Finding {
             tag,
             detail: String::new(),
+            note: false,
         };
         let v = Verdict::Risky(vec![f("setuid"), f("hardcoded-path"), f("setuid")]);
         assert_eq!(v.label(), "risky");

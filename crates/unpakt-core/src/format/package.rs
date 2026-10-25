@@ -77,7 +77,7 @@ pub(crate) fn inspect_package(a: &Artifact, h: Header, host_arch: &Arch) -> Resu
 
     let mut desktop_entry = None;
     let mut desktop = None;
-    if let Some(text) = desktops.values().next() {
+    if let Some(text) = pick_desktop(&desktops, &h.name) {
         match DesktopEntry::parse(text) {
             Ok(entry) => {
                 desktop_entry = Some(entry);
@@ -251,6 +251,24 @@ fn pick_icon(
     let ext = icon_ext(&full)?.to_string();
     let data = icons.get(&full)?.clone();
     Some(Icon { ext, data })
+}
+
+/// Prefers `<package name>.desktop`, then the first file that is shown in
+/// menus, then the first file.
+fn pick_desktop<'a>(desktops: &'a BTreeMap<PathBuf, String>, name: &str) -> Option<&'a String> {
+    if !name.is_empty()
+        && let Some((_, text)) = desktops
+            .iter()
+            .find(|(p, _)| p.file_stem().is_some_and(|s| s == name))
+    {
+        return Some(text);
+    }
+    let shown = desktops.values().find(|text| {
+        DesktopEntry::parse(text)
+            .ok()
+            .is_none_or(|d| d.get("NoDisplay").map(str::trim) != Some("true"))
+    });
+    shown.or_else(|| desktops.values().next())
 }
 
 fn is_desktop_file(path: &Path) -> bool {

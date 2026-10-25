@@ -50,11 +50,115 @@ const COMMANDS: [&str; 9] = [
 
 /// The first line of `text` that is not on the allowlist, trimmed. Scripts are
 /// only ever read, never run.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn unrecognized_line(text: &str, index: &PayloadIndex) -> Option<String> {
+    unrecognized_lines(text, index).into_iter().next()
+}
+
+fn unrecognized_lines(text: &str, index: &PayloadIndex) -> Vec<String> {
     text.lines()
         .map(str::trim)
-        .find(|line| !line_ok(line, index))
+        .filter(|line| !line_ok(line, index))
         .map(str::to_string)
+        .collect()
+}
+
+/// What a script's unrecognized lines amount to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ScriptIssue {
+    /// Creates accounts, capabilities, kernel settings or modules.
+    System(String),
+    /// Tries to set a setuid or setgid bit.
+    Setuid(String),
+    /// Anything else that is not on the allowlist (first such line).
+    Other(String),
+}
+
+const SYSTEM_COMMANDS: [&str; 11] = [
+    "useradd",
+    "adduser",
+    "groupadd",
+    "addgroup",
+    "usermod",
+    "systemd-sysusers",
+    "setcap",
+    "sysctl",
+    "modprobe",
+    "insmod",
+    "dkms",
+];
+
+const LEADING: [&str; 9] = [
+    "if", "then", "else", "!", "elif", "while", "do", "exec", "sudo",
+];
+
+pub(crate) fn assess(text: &str, index: &PayloadIndex) -> Option<ScriptIssue> {
+    let lines = unrecognized_lines(text, index);
+    let first = lines.first()?.clone();
+    if let Some(line) = lines.iter().find(|l| {
+        simple_commands(l)
+            .iter()
+            .any(|c| SYSTEM_COMMANDS.contains(&c.as_str()))
+    }) {
+        return Some(ScriptIssue::System(line.clone()));
+    }
+    if let Some(line) = lines.iter().find(|l| sets_setuid(l)) {
+        return Some(ScriptIssue::Setuid(line.clone()));
+    }
+    Some(ScriptIssue::Other(first))
+}
+
+/// First word of each simple command on the line.
+fn simple_commands(line: &str) -> Vec<String> {
+    let spaced: String = line
+        .chars()
+        .map(|c| {
+            if matches!(c, ';' | '&' | '|' | '`' | '{' | '}' | '(' | ')') {
+                '\n'
+            } else {
+                c
+            }
+        })
+        .collect();
+    spaced
+        .lines()
+        .filter_map(|segment| {
+            let word = segment.split_whitespace().find(|w| {
+                !LEADING.contains(w)
+                    && !(w.contains('=') && !w.starts_with('=') && !w.contains('/'))
+            })?;
+            let word = word.trim_matches(|c| c == '\'' || c == '"');
+            Some(word.rsplit('/').next().unwrap_or(word).to_string())
+        })
+        .collect()
+}
+
+fn sets_setuid(line: &str) -> bool {
+    simple_chunks(line).any(|chunk| {
+        let mut words = chunk
+            .split_whitespace()
+            .skip_while(|w| LEADING.contains(w) || is_assignment(w));
+        if words.next().map(|w| w.rsplit('/').next().unwrap_or(w)) != Some("chmod") {
+            return false;
+        }
+        words
+            .filter(|w| !w.starts_with('-') || w.contains("+s"))
+            .any(|w| {
+                let w = w.trim_matches(|c| c == '\'' || c == '"');
+                w.contains("+s")
+                    || (w.len() == 4
+                        && w.chars().all(|c| c.is_ascii_digit())
+                        && matches!(w.as_bytes()[0], b'2' | b'4' | b'6'))
+            })
+    })
+}
+
+fn is_assignment(w: &str) -> bool {
+    w.contains('=') && !w.starts_with('=') && !w.contains('/')
+}
+
+fn simple_chunks(line: &str) -> impl Iterator<Item = &str> {
+    line.split([';', '&', '|', '`', '{', '}', '(', ')'])
 }
 
 fn strip_trailing(line: &str) -> &str {
@@ -125,6 +229,9 @@ fn is_if_line(s: &str) -> bool {
 
 fn command_ok(cmd: &str, index: &PayloadIndex) -> bool {
     let cmd = cmd.trim();
+    if cmd.contains([';', '&', '|', '`', '>', '<']) || cmd.contains("$(") {
+        return false;
+    }
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let Some(first) = words.first() else {
         return true;
@@ -204,6 +311,43 @@ mod tests {
         );
         assert_eq!(unrecognized_line("systemctl daemon-reload", &i), None);
         assert!(unrecognized_line("systemctl enable foo", &i).is_some());
+    }
+
+    #[test]
+    fn compound_lines_are_never_allowlisted() {
+        let i = none();
+        for line in [
+            "ldconfig; useradd foo",
+            "ldconfig && useradd foo",
+            "ldconfig | tee x",
+            "ldconfig $(id)",
+            "ldconfig `id`",
+            "ldconfig > /etc/x",
+        ] {
+            assert!(unrecognized_line(line, &i).is_some(), "{line}");
+        }
+    }
+
+    #[test]
+    fn assess_classifies() {
+        let i = none();
+        assert!(matches!(
+            assess("ldconfig; useradd foo", &i),
+            Some(ScriptIssue::System(_))
+        ));
+        assert!(matches!(
+            assess("if ! getent passwd x; then\n  sudo adduser x\nfi", &i),
+            Some(ScriptIssue::System(_))
+        ));
+        assert!(matches!(
+            assess("FOO=1 chmod u+s /opt/x/sb || true", &i),
+            Some(ScriptIssue::Setuid(_))
+        ));
+        assert!(matches!(
+            assess("chmod 0755 /opt/x/sb", &i),
+            Some(ScriptIssue::Other(_))
+        ));
+        assert_eq!(assess("ldconfig\n", &i), None);
     }
 
     #[test]

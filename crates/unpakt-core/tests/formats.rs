@@ -421,6 +421,41 @@ fn deb_inspects_metadata_entry_desktop_icon() {
     assert_eq!(meta.elf[Path::new("opt/Foo/foo")].needed, ["libc.so.6"]);
 }
 
+fn two_desktops_deb(dir: &Path, package: &str) -> std::path::PathBuf {
+    let elf = build_elf(&[], None, &[], &[]);
+    let url = b"[Desktop Entry]\nType=Application\nName=URL Handler\nNoDisplay=true\nExec=/usr/bin/code --open-url %U\n";
+    let app = b"[Desktop Entry]\nType=Application\nName=Code\nExec=/usr/bin/code %F\n";
+    let data = [
+        E::File("usr/share/code/code", &elf, 0o755),
+        E::Link("usr/bin/code", "/usr/share/code/code"),
+        E::File(
+            "usr/share/applications/code-url-handler.desktop",
+            url,
+            0o644,
+        ),
+        E::File("usr/share/applications/code.desktop", app, 0o644),
+    ];
+    let control = format!(
+        "Package: {package}\nVersion: 1\nArchitecture: {}\n",
+        host_package_arch()
+    );
+    build_deb(dir, "x.deb", &control, &[], &data)
+}
+
+#[test]
+fn deb_desktop_prefers_the_package_named_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = inspect(&two_desktops_deb(tmp.path(), "code")).unwrap();
+    assert_eq!(p.name, "Code");
+}
+
+#[test]
+fn deb_desktop_skips_nodisplay_when_no_name_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = inspect(&two_desktops_deb(tmp.path(), "other")).unwrap();
+    assert_eq!(p.name, "Code");
+}
+
 #[test]
 fn deb_foreign_arch_refused() {
     let tmp = tempfile::tempdir().unwrap();

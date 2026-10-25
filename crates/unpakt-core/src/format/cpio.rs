@@ -1,6 +1,6 @@
 //! Reader for `newc` (`070701`) and `crc` (`070702`) cpio archives.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read};
 use std::path::PathBuf;
 
@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 const HEADER_LEN: usize = 110;
 const MAX_NAME: u64 = 4096;
 const MAX_LINK_TARGET: u64 = 4096;
+const MAX_PENDING: usize = 65536;
 const TRAILER: &[u8] = b"TRAILER!!!";
 
 const S_IFMT: u32 = 0o170000;
@@ -46,8 +47,9 @@ impl<R: Read> Read for Limited<R> {
     }
 }
 
+type Key = (u32, u32, u32);
+
 struct Pending {
-    key: (u32, u32, u32),
     path: PathBuf,
     mode: u32,
 }
@@ -58,7 +60,10 @@ pub(crate) struct Reader<R: Read> {
     pad: u64,
     /// Zero-size records with `nlink > 1` waiting for the record that holds
     /// their data.
-    pending: Vec<Pending>,
+    pending: HashMap<Key, Vec<Pending>>,
+    /// Keys of `pending` in arrival order.
+    order: Vec<Key>,
+    pending_count: usize,
     ready: VecDeque<(PathBuf, StreamKind, u32)>,
     empty: io::Empty,
     done: bool,
@@ -88,7 +93,9 @@ impl<R: Read> Reader<R> {
         Reader {
             src: Limited { inner, left: 0 },
             pad: 0,
-            pending: Vec::new(),
+            pending: HashMap::new(),
+            order: Vec::new(),
+            pending_count: 0,
             ready: VecDeque::new(),
             empty: io::empty(),
             done: false,
@@ -174,21 +181,29 @@ impl<R: Read> Reader<R> {
                 S_IFREG => {
                     if nlink > 1 {
                         if size == 0 {
-                            self.pending.push(Pending { key, path, mode });
+                            if self.pending_count >= MAX_PENDING {
+                                return Err(Error::Parse(
+                                    "too many pending cpio hard links".into(),
+                                ));
+                            }
+                            self.pending_count += 1;
+                            let group = self.pending.entry(key).or_default();
+                            if group.is_empty() {
+                                self.order.push(key);
+                            }
+                            group.push(Pending { path, mode });
                             self.src.left = 0;
                             continue;
                         }
-                        let mut i = 0;
-                        while i < self.pending.len() {
-                            if self.pending[i].key == key {
-                                let p = self.pending.remove(i);
+                        if let Some(group) = self.pending.remove(&key) {
+                            self.pending_count -= group.len();
+                            self.order.retain(|k| *k != key);
+                            for p in group {
                                 self.ready.push_back((
                                     p.path,
                                     StreamKind::HardLink(path.clone()),
                                     p.mode,
                                 ));
-                            } else {
-                                i += 1;
                             }
                         }
                     }
@@ -213,25 +228,20 @@ impl<R: Read> Reader<R> {
     /// Groups that never received a data record are empty files: the first
     /// stays a file and the rest link to it.
     fn flush_pending(&mut self) {
-        let mut pending = std::mem::take(&mut self.pending);
-        while !pending.is_empty() {
-            let first = pending.remove(0);
-            let mut i = 0;
-            while i < pending.len() {
-                if pending[i].key == first.key {
-                    let p = pending.remove(i);
-                    self.ready.push_back((
-                        p.path,
-                        StreamKind::HardLink(first.path.clone()),
-                        p.mode,
-                    ));
-                } else {
-                    i += 1;
-                }
+        for key in std::mem::take(&mut self.order) {
+            let Some(group) = self.pending.remove(&key) else {
+                continue;
+            };
+            let mut group = group.into_iter();
+            let Some(first) = group.next() else { continue };
+            for p in group {
+                self.ready
+                    .push_back((p.path, StreamKind::HardLink(first.path.clone()), p.mode));
             }
             self.ready
                 .push_front((first.path, StreamKind::File, first.mode));
         }
+        self.pending_count = 0;
     }
 }
 
@@ -335,5 +345,25 @@ pub(crate) mod tests {
         let got = collect(&bytes).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, PathBuf::from("f"));
+    }
+
+    #[test]
+    fn cpio_bounds_pending_hard_links() {
+        let mut bytes = Vec::new();
+        for i in 0..=MAX_PENDING as u32 {
+            bytes.extend(record(i + 1, 0o100644, 2, "a", b""));
+        }
+        let err = collect(&bytes).unwrap_err();
+        assert!(matches!(err, Error::Parse(_)));
+    }
+
+    #[test]
+    fn cpio_empty_hard_link_group_is_flushed_at_trailer() {
+        let mut bytes = record(7, 0o100644, 2, "a", b"");
+        bytes.extend(record(7, 0o100644, 2, "b", b""));
+        bytes.extend(record(0, 0, 1, "TRAILER!!!", b""));
+        let got = collect(&bytes).unwrap();
+        assert_eq!(got[0].1, StreamKind::File);
+        assert_eq!(got[1].1, StreamKind::HardLink(PathBuf::from("a")));
     }
 }

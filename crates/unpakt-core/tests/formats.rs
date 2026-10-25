@@ -1,6 +1,9 @@
 mod common;
 
-use common::{Comp, E, build_appimage, build_tarball};
+use common::{
+    Comp, E, build_appimage, build_ar, build_deb, build_elf, build_tarball, electron_like_with,
+    host_package_arch,
+};
 use std::path::Path;
 use unpakt_core::Error;
 use unpakt_core::format::detect;
@@ -214,8 +217,7 @@ fn links_inside_the_root_are_accepted() {
 #[test]
 fn names_unsupported_formats() {
     let tmp = tempfile::tempdir().unwrap();
-    let cases: [(&[u8], &str); 4] = [
-        (b"!<arch>\ndebian-binary   ", "deb"),
+    let cases: [(&[u8], &str); 3] = [
         (b"\xED\xAB\xEE\xDB\x03\x00rest-of-rpm", "rpm"),
         (b"PK\x03\x04zipdata", "zip"),
         (ELF, "plain executable"),
@@ -386,4 +388,119 @@ fn oversized_tarball_icon_is_dropped_with_warning() {
         "{:?}",
         p.warnings
     );
+}
+
+fn foreign_arch() -> &'static str {
+    if host_package_arch() == "arm64" {
+        "amd64"
+    } else {
+        "arm64"
+    }
+}
+
+fn control(arch: &str) -> String {
+    format!("Package: foo\nVersion: 1.2.3\nArchitecture: {arch}\n")
+}
+
+#[test]
+fn deb_inspects_metadata_entry_desktop_icon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = electron_like_with(
+        tmp.path(),
+        FormatKind::Deb,
+        "Depends: libgtk-3-0, libnss3 (>= 3.26)\n",
+    );
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.format, FormatKind::Deb);
+    assert_eq!(p.name, "Foo");
+    assert_eq!(p.version.as_deref(), Some("1.2.3"));
+    assert_eq!(p.entries[0].path, Path::new("opt/Foo/foo"));
+    assert!(p.icon.is_some());
+    let meta = p.package.unwrap();
+    assert_eq!(meta.depends, ["libgtk-3-0", "libnss3 (>= 3.26)"]);
+    assert_eq!(meta.scripts[0].name, "postinst");
+    assert!(meta.scripts[0].text.contains("update-desktop-database"));
+    assert_eq!(meta.index.setuid, [Path::new("opt/Foo/chrome-sandbox")]);
+    assert!(meta.elf.contains_key(Path::new("opt/Foo/foo")));
+    assert_eq!(meta.elf[Path::new("opt/Foo/foo")].needed, ["libc.so.6"]);
+}
+
+#[test]
+fn deb_foreign_arch_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = build_deb(tmp.path(), "a.deb", &control(foreign_arch()), &[], &[]);
+    assert!(matches!(inspect(&path), Err(Error::Refused(_))));
+}
+
+#[test]
+fn deb_all_arch_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [E::File("opt/foo/foo", &elf, 0o755)];
+    let path = build_deb(tmp.path(), "a.deb", &control("all"), &[], &data);
+    assert!(inspect(&path).is_ok());
+}
+
+#[test]
+fn deb_with_bz2_data_is_unsupported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = build_ar(
+        tmp.path(),
+        "a.deb",
+        &[
+            ("debian-binary", b"2.0\n".to_vec()),
+            ("data.tar.bz2", b"BZh".to_vec()),
+        ],
+    );
+    assert!(matches!(inspect(&path), Err(Error::Unsupported(_))));
+}
+
+#[test]
+fn deb_dot_paths_normalize() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = electron_like_with(tmp.path(), FormatKind::Deb, "");
+    let meta = inspect(&path).unwrap().package.unwrap();
+    assert!(!meta.index.files.is_empty());
+    for p in meta.index.files.iter().chain(&meta.index.dirs) {
+        assert!(!p.starts_with("."), "{}", p.display());
+    }
+    assert_eq!(
+        meta.index.links[Path::new("usr/bin/foo")],
+        Path::new("/opt/Foo/foo")
+    );
+}
+
+#[test]
+fn deb_without_desktop_falls_back_to_heuristic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [E::File("opt/foo/foo", &elf, 0o755)];
+    let path = build_deb(tmp.path(), "a.deb", &control("all"), &[], &data);
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.entries[0].path, Path::new("opt/foo/foo"));
+    assert_eq!(p.name, "foo");
+}
+
+#[test]
+fn deb_script_entry_keeps_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [
+        E::File("opt/Foo/foo", &elf, 0o755),
+        E::File(
+            "usr/bin/foo",
+            b"#!/bin/sh\nexec /opt/Foo/foo \"$@\"\n",
+            0o755,
+        ),
+        E::File(
+            "usr/share/applications/foo.desktop",
+            b"[Desktop Entry]\nType=Application\nName=Foo\nExec=/usr/bin/foo\n",
+            0o644,
+        ),
+    ];
+    let path = build_deb(tmp.path(), "a.deb", &control("all"), &[], &data);
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.entries[0].path, Path::new("usr/bin/foo"));
+    let meta = p.package.unwrap();
+    assert!(meta.entry_script.unwrap().contains("exec /opt/Foo/foo"));
 }

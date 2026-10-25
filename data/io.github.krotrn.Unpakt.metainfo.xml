@@ -11,8 +11,9 @@
   <description>
     <p>
       unpakt installs portable Linux apps (AppImages, tarballs and deb, rpm and
-      pacman packages) for your user account from a file, a download URL or a GitHub repository, and adds
-      them to your application menu and command path.
+      pacman packages) for your user account from a file, a download URL or a
+      GitHub repository, and adds them to your application menu and command
+      path.
     </p>
     <p>
       Installed apps can be updated, rolled back to their previous version or

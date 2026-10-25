@@ -3,8 +3,9 @@
 site_name: unpakt
 site_url: https://krotrn.github.io/unpakt/
 site_description: >-
-  Install AppImages and tarballs on Linux per user, from a file, a URL or a
-  GitHub repository, with updates, rollback and launcher entries.
+  Install AppImages, tarballs and deb, rpm and pacman packages on Linux per
+  user, from a file, a URL or a GitHub repository, with updates, rollback and
+  launcher entries.
 site_author: krotrn
 repo_url: https://github.com/krotrn/unpakt
 repo_name: krotrn/unpakt

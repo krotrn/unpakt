@@ -2,7 +2,7 @@
 pkgname=unpakt
 pkgver=0.1.3
 pkgrel=1
-pkgdesc="Install, update and roll back AppImages and tarballs per user"
+pkgdesc="Install, update and roll back AppImages, tarballs and deb, rpm and pacman packages per user"
 arch=('x86_64')
 url="https://github.com/krotrn/unpakt"
 license=('MIT OR Apache-2.0')

@@ -8,10 +8,11 @@ Maintainer: krotrn <krotrn.ks@gmail.com>
 Depends: @DEPENDS@
 Recommends: libfuse2t64 | libfuse2
 Homepage: https://github.com/krotrn/unpakt
-Description: Install, update and roll back AppImages and tarballs per user
- unpakt installs AppImages and tarballs into your home directory, adds
- launcher entries and a command on PATH, and can update or roll back each
- app. It comes with a command line tool (unpakt) and a GTK 4 / libadwaita
+Description: Install, update and roll back portable apps and packages per user
+ unpakt installs AppImages, tarballs and deb, rpm and pacman packages into
+ your home directory, adds launcher entries and a command on PATH, and can
+ update or roll back each app. Packages are unpacked, never run, and checked
+ first for whether they will work on this system. It comes with a command line tool (unpakt) and a GTK 4 / libadwaita
  interface (unpakt-gui).
  .
  Running AppImages directly needs FUSE 2; without it unpakt extracts them.

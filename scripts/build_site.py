@@ -21,7 +21,7 @@ ROOT_PAGES = ("ARCHITECTURE.md", "CONTRIBUTING.md", "CHANGELOG.md")
 # page in site-src -> (title, description)
 PAGES = {
     "index.md": (
-        "unpakt: install AppImages and tarballs on Linux, per user",
+        "unpakt: install AppImages, tarballs and packages on Linux, per user",
         "Install portable Linux apps from a file, a download URL or a GitHub repository, "
         "with launcher entries, updates and rollback. Command line and GTK 4 app.",
     ),

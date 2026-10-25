@@ -2,7 +2,7 @@ mod common;
 
 use common::{
     Comp, E, RpmTags, build_appimage, build_ar, build_deb, build_elf, build_pacman, build_rpm,
-    build_tarball, electron_like_with, host_package_arch, host_rpm_arch,
+    build_rpm_with, build_tarball, electron_like_with, host_package_arch, host_rpm_arch,
 };
 use std::path::Path;
 use unpakt_core::Error;
@@ -566,6 +566,29 @@ fn rpm_inspects_metadata_and_entry() {
     assert!(meta.scripts[0].text.contains("update-desktop-database"));
     assert_eq!(meta.index.setuid, [Path::new("opt/Foo/chrome-sandbox")]);
     assert!(meta.elf.contains_key(Path::new("opt/Foo/foo")));
+}
+
+#[test]
+fn rpm_reads_transaction_scripts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [E::File("opt/foo/foo", &elf, 0o755)];
+    let path = build_rpm_with(
+        tmp.path(),
+        "a.rpm",
+        rpm_tags("noarch"),
+        &data,
+        &[(1151, "useradd evil"), (1152, "ldconfig")],
+    );
+    let meta = inspect(&path).unwrap().package.unwrap();
+    let text = |name: &str| {
+        meta.scripts
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.text.as_str())
+    };
+    assert_eq!(text("%pretrans"), Some("useradd evil"));
+    assert_eq!(text("%posttrans"), Some("ldconfig"));
 }
 
 #[test]

@@ -59,10 +59,19 @@ impl FormatPlugin for Pacman {
         let mut install = None;
         for entry in archive.entries().map_err(bad)? {
             let entry = entry.map_err(bad)?;
+            let path = normalize(&entry.path().map_err(bad)?)?;
+            // Metadata files come first; the payload starts at the first
+            // member that is not a dot file.
+            if !path
+                .components()
+                .next()
+                .is_some_and(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+            {
+                break;
+            }
             if !entry.header().entry_type().is_file() {
                 continue;
             }
-            let path = normalize(&entry.path().map_err(bad)?)?;
             let slot = if path == std::path::Path::new(PKGINFO) {
                 &mut pkginfo
             } else if path == std::path::Path::new(INSTALL) {

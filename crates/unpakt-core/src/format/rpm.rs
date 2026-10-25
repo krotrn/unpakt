@@ -20,11 +20,13 @@ const TAG_RELEASE: u32 = 1002;
 const TAG_ARCH: u32 = 1022;
 const TAG_SOURCERPM: u32 = 1044;
 const TAG_REQUIRENAME: u32 = 1049;
-const SCRIPT_TAGS: [(u32, &str); 4] = [
+const SCRIPT_TAGS: [(u32, &str); 6] = [
     (1023, "%pre"),
     (1024, "%post"),
     (1025, "%preun"),
     (1026, "%postun"),
+    (1151, "%pretrans"),
+    (1152, "%posttrans"),
 ];
 
 const TYPE_STRING: u32 = 6;

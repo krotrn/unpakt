@@ -66,22 +66,26 @@ impl ElfFacts {
 fn scan_abs_paths(bytes: &[u8]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut i = 0;
+    let mut nul_at = 0;
     while i < bytes.len() && out.len() < MAX_ABS_PATHS {
         if bytes[i] != b'/' || !ABS_PREFIXES.iter().any(|p| bytes[i..].starts_with(p)) {
             i += 1;
             continue;
         }
-        let limit = bytes.len().min(i + MAX_ABS_PATH_LEN + 1);
-        let window = &bytes[i..limit];
-        match window.iter().position(|&b| b == 0) {
-            Some(end) => {
-                if let Ok(s) = std::str::from_utf8(&window[..end]) {
-                    out.insert(s.to_string());
-                }
-                i += end + 1;
+        if nul_at < i {
+            match bytes[i..].iter().position(|&b| b == 0) {
+                Some(n) => nul_at = i + n,
+                None => break,
             }
-            None => i += 1,
         }
+        if nul_at - i > MAX_ABS_PATH_LEN {
+            i += 1;
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(&bytes[i..nul_at]) {
+            out.insert(s.to_string());
+        }
+        i = nul_at + 1;
     }
     out
 }
@@ -295,9 +299,19 @@ mod tests {
         let Ok(bytes) = std::fs::read("/bin/sh") else {
             return;
         };
-        let Some(f) = ElfFacts::parse(&bytes) else {
+        if !bytes.starts_with(b"\x7fELF") {
             return;
-        };
+        }
+        let f = ElfFacts::parse(&bytes).expect("host ELF parses");
         assert!(f.needed.iter().any(|n| n.starts_with("libc.so")));
+    }
+
+    #[test]
+    fn long_nul_free_prefix_runs_scan_in_linear_time() {
+        let mut bytes = build_elf(&["libc.so.6"], None, &[], &["/opt/Foo/res"]);
+        bytes.extend(b"/opt/".repeat(2 * 1024 * 1024));
+        let f = ElfFacts::parse(&bytes).expect("still parses");
+        assert!(f.abs_paths.contains("/opt/Foo/res"));
+        assert_eq!(f.needed, ["libc.so.6"]);
     }
 }

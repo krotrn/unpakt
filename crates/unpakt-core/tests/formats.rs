@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    Comp, E, RpmTags, build_appimage, build_ar, build_deb, build_elf, build_rpm, build_tarball,
-    electron_like_with, host_package_arch, host_rpm_arch,
+    Comp, E, RpmTags, build_appimage, build_ar, build_deb, build_elf, build_pacman, build_rpm,
+    build_tarball, electron_like_with, host_package_arch, host_rpm_arch,
 };
 use std::path::Path;
 use unpakt_core::Error;
@@ -586,4 +586,129 @@ fn rpm_hard_linked_entry_keeps_elf_facts() {
     assert!(meta.elf.contains_key(Path::new("opt/foo/foo")));
     assert!(meta.elf.contains_key(Path::new("opt/foo/real")));
     assert!(meta.index.files.contains(Path::new("opt/foo/foo")));
+}
+
+#[test]
+fn pacman_inspects_metadata_and_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = electron_like_with(
+        tmp.path(),
+        FormatKind::Pacman,
+        "depend = gtk3\ndepend = nss\n",
+    );
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.format, FormatKind::Pacman);
+    assert_eq!(p.name, "Foo");
+    assert_eq!(p.entries[0].path, Path::new("opt/Foo/foo"));
+    assert!(p.icon.is_some());
+    let meta = p.package.unwrap();
+    assert_eq!(meta.depends, ["gtk3", "nss"]);
+    assert_eq!(meta.scripts[0].name, ".INSTALL");
+    assert!(meta.scripts[0].text.contains("update-desktop-database"));
+    assert_eq!(meta.index.setuid, [Path::new("opt/Foo/chrome-sandbox")]);
+    assert!(!meta.index.files.contains(Path::new(".PKGINFO")));
+    assert!(!meta.index.files.contains(Path::new(".INSTALL")));
+}
+
+#[test]
+fn pacman_any_arch_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [E::File("opt/foo/foo", &elf, 0o755)];
+    let path = build_pacman(
+        tmp.path(),
+        "a.pkg.tar.zst",
+        "pkgname = foo\npkgver = 1-1\narch = any\n",
+        None,
+        &data,
+        Comp::Zst,
+    );
+    assert!(inspect(&path).is_ok());
+}
+
+#[test]
+fn pacman_foreign_arch_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let foreign = if host_package_arch() == "arm64" {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
+    let info = format!("pkgname = foo\npkgver = 1-1\narch = {foreign}\n");
+    let path = build_pacman(tmp.path(), "a.pkg.tar.zst", &info, None, &[], Comp::Zst);
+    assert!(matches!(inspect(&path), Err(Error::Refused(_))));
+}
+
+#[test]
+fn pacman_xz_detected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let info = "pkgname = foo\npkgver = 1-1\narch = any\n";
+    let path = build_pacman(tmp.path(), "a.pkg.tar.xz", info, None, &[], Comp::Xz);
+    assert_eq!(detect(&artifact(&path)).unwrap().kind(), FormatKind::Pacman);
+}
+
+#[test]
+fn tar_zst_without_pkginfo_is_tarball() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = [E::File("foo/foo", ELF, 0o755)];
+    let path = build_tarball(tmp.path(), "foo.pkg.tar.zst", Comp::Zst, &data);
+    assert_eq!(
+        detect(&artifact(&path)).unwrap().kind(),
+        FormatKind::Tarball
+    );
+}
+
+#[test]
+fn tarball_with_late_pkginfo_is_tarball() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = [
+        E::File("usr/x", ELF, 0o755),
+        E::File(".PKGINFO", b"pkgname = foo\n", 0o644),
+    ];
+    let path = build_tarball(tmp.path(), "foo.tar.zst", Comp::Zst, &data);
+    assert_eq!(
+        detect(&artifact(&path)).unwrap().kind(),
+        FormatKind::Tarball
+    );
+}
+
+#[test]
+fn nested_pkginfo_is_not_pacman() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = [E::File("x/.PKGINFO", b"pkgname = foo\n", 0o644)];
+    let path = build_tarball(tmp.path(), "foo.tar.zst", Comp::Zst, &data);
+    assert_eq!(
+        detect(&artifact(&path)).unwrap().kind(),
+        FormatKind::Tarball
+    );
+}
+
+#[test]
+fn pacman_dot_prefixed_pkginfo_detected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = [E::File("./.PKGINFO", b"pkgname = foo\n", 0o644)];
+    let path = build_tarball(tmp.path(), "a.pkg.tar.zst", Comp::Zst, &data);
+    assert_eq!(detect(&artifact(&path)).unwrap().kind(), FormatKind::Pacman);
+}
+
+#[test]
+fn pacman_missing_fields_is_parse_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = build_pacman(
+        tmp.path(),
+        "a.pkg.tar.zst",
+        "pkgname = foo\n",
+        None,
+        &[],
+        Comp::Zst,
+    );
+    assert!(matches!(inspect(&path), Err(Error::Parse(_))));
+}
+
+#[test]
+fn pacman_oversized_pkginfo_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let big = format!("pkgname = foo\n{}", "#".repeat(2 * 1024 * 1024));
+    let path = build_pacman(tmp.path(), "a.pkg.tar.zst", &big, None, &[], Comp::Zst);
+    assert!(matches!(inspect(&path), Err(Error::Refused(_))));
 }

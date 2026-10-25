@@ -60,9 +60,9 @@ pub(crate) struct Reader<R: Read> {
     pad: u64,
     /// Zero-size records with `nlink > 1` waiting for the record that holds
     /// their data.
-    pending: HashMap<Key, Vec<Pending>>,
-    /// Keys of `pending` in arrival order.
-    order: Vec<Key>,
+    pending: HashMap<Key, (u64, Vec<Pending>)>,
+    /// Arrival number given to the next new group.
+    next_seq: u64,
     pending_count: usize,
     ready: VecDeque<(PathBuf, StreamKind, u32)>,
     empty: io::Empty,
@@ -94,7 +94,7 @@ impl<R: Read> Reader<R> {
             src: Limited { inner, left: 0 },
             pad: 0,
             pending: HashMap::new(),
-            order: Vec::new(),
+            next_seq: 0,
             pending_count: 0,
             ready: VecDeque::new(),
             empty: io::empty(),
@@ -187,17 +187,18 @@ impl<R: Read> Reader<R> {
                                 ));
                             }
                             self.pending_count += 1;
-                            let group = self.pending.entry(key).or_default();
-                            if group.is_empty() {
-                                self.order.push(key);
+                            let seq = self.next_seq;
+                            let group =
+                                self.pending.entry(key).or_insert_with(|| (seq, Vec::new()));
+                            if group.1.is_empty() {
+                                self.next_seq += 1;
                             }
-                            group.push(Pending { path, mode });
+                            group.1.push(Pending { path, mode });
                             self.src.left = 0;
                             continue;
                         }
-                        if let Some(group) = self.pending.remove(&key) {
+                        if let Some((_, group)) = self.pending.remove(&key) {
                             self.pending_count -= group.len();
-                            self.order.retain(|k| *k != key);
                             for p in group {
                                 self.ready.push_back((
                                     p.path,
@@ -228,10 +229,9 @@ impl<R: Read> Reader<R> {
     /// Groups that never received a data record are empty files: the first
     /// stays a file and the rest link to it.
     fn flush_pending(&mut self) {
-        for key in std::mem::take(&mut self.order) {
-            let Some(group) = self.pending.remove(&key) else {
-                continue;
-            };
+        let mut groups: Vec<_> = std::mem::take(&mut self.pending).into_values().collect();
+        groups.sort_by_key(|(seq, _)| *seq);
+        for (_, group) in groups {
             let mut group = group.into_iter();
             let Some(first) = group.next() else { continue };
             for p in group {
@@ -365,5 +365,29 @@ pub(crate) mod tests {
         let got = collect(&bytes).unwrap();
         assert_eq!(got[0].1, StreamKind::File);
         assert_eq!(got[1].1, StreamKind::HardLink(PathBuf::from("a")));
+    }
+
+    #[test]
+    fn cpio_matches_many_hard_link_groups() {
+        const N: u32 = 3000;
+        let mut bytes = Vec::new();
+        for i in 0..N {
+            bytes.extend(record(i + 1, 0o100644, 2, &format!("l{i}"), b""));
+        }
+        for i in 0..N {
+            bytes.extend(record(i + 1, 0o100644, 2, &format!("d{i}"), b"x"));
+        }
+        bytes.extend(record(0, 0, 1, "TRAILER!!!", b""));
+        let got = collect(&bytes).unwrap();
+        assert_eq!(got.len(), 2 * N as usize);
+        for i in 0..N as usize {
+            assert_eq!(got[2 * i].0, PathBuf::from(format!("d{i}")));
+            assert_eq!(got[2 * i].1, StreamKind::File);
+            assert_eq!(got[2 * i + 1].0, PathBuf::from(format!("l{i}")));
+            assert_eq!(
+                got[2 * i + 1].1,
+                StreamKind::HardLink(PathBuf::from(format!("d{i}")))
+            );
+        }
     }
 }

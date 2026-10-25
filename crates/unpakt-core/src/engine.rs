@@ -486,7 +486,7 @@ impl Engine {
             self.emit(Progress::Fetching);
         }
         let release = plugin.latest(&source, &self.http)?;
-        let asset = choose(&release.assets, &self.host, pattern.as_ref())?;
+        let asset = choose(&release.assets, &self.host, pattern.as_ref(), None)?;
         let canonical = match source.kind {
             SourceKind::LocalFile => PathBuf::from(&asset.url),
             _ => self.download_asset(&asset.url)?,

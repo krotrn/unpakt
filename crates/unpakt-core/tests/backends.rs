@@ -437,3 +437,129 @@ mod packages {
         assert!(!src.path().join("evil").exists());
     }
 }
+
+mod package_engine {
+    use super::common::{E, MockForge, build_deb, build_elf, electron_like, host_package_arch};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use unpakt_core::compat::HostLibs;
+    use unpakt_core::engine::{AddOpts, Engine};
+    use unpakt_core::http::Http;
+    use unpakt_core::model::FormatKind;
+    use unpakt_core::{Layout, host::Host};
+
+    fn engine(root: &Path, forge: Option<&MockForge>) -> Engine {
+        let layout = Layout::under(root);
+        let bin = OsString::from(layout.bin.clone());
+        let libs = HostLibs::from_parts(
+            BTreeMap::from([("libc.so.6".to_string(), PathBuf::from("/lib/libc.so.6"))]),
+            BTreeMap::<String, BTreeSet<String>>::new(),
+            true,
+        );
+        let engine = Engine::new(layout, Host::detect())
+            .unwrap()
+            .with_path_var(bin)
+            .with_host_libs(libs);
+        match forge {
+            Some(f) => engine.with_http(Http::new(&f.api_url(), None).unwrap()),
+            None => engine,
+        }
+    }
+
+    fn exec_of(layout: &Layout, id: &str) -> String {
+        let text =
+            std::fs::read_to_string(layout.applications.join(format!("unpakt-{id}.desktop")))
+                .unwrap();
+        text.lines()
+            .find_map(|l| l.strip_prefix("Exec="))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn package_installs_through_engine() {
+        for format in [FormatKind::Deb, FormatKind::Rpm, FormatKind::Pacman] {
+            let src = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let pkg = electron_like(src.path(), format);
+            let mut engine = engine(root.path(), None);
+            let layout = engine.layout().clone();
+
+            let plan = engine
+                .inspect(pkg.to_str().unwrap(), AddOpts::default())
+                .unwrap();
+            let id = engine.install(plan).unwrap().id;
+            assert_eq!(id, "foo", "{format:?}");
+
+            let current = layout.apps.join("foo").join("current");
+            let entry = current.join("opt/Foo/foo");
+            assert!(entry.is_file(), "{format:?}");
+            assert_eq!(
+                std::fs::metadata(&entry).unwrap().permissions().mode() & 0o111,
+                0o111,
+                "{format:?}"
+            );
+            let label = std::fs::read_link(&current).unwrap();
+            let link = layout.apps.join("foo").join(&label).join("usr/bin/foo");
+            assert!(
+                std::fs::symlink_metadata(&link).unwrap().is_symlink(),
+                "{format:?}"
+            );
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("../../opt/Foo/foo"),
+                "{format:?}"
+            );
+            assert_eq!(
+                std::fs::read_link(layout.bin.join("foo")).unwrap(),
+                entry,
+                "{format:?}"
+            );
+            assert_eq!(Path::new(&exec_of(&layout, "foo")), entry, "{format:?}");
+        }
+    }
+
+    #[test]
+    fn package_rollback_works() {
+        let forge = MockForge::start();
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = engine(root.path(), Some(&forge));
+        let layout = engine.layout().clone();
+
+        let publish = |version: &str| {
+            let name = format!("foo_{version}_{}.deb", host_package_arch());
+            let elf = build_elf(&["libc.so.6"], None, &[], &[]);
+            let control = format!(
+                "Package: foo\nVersion: {version}\nArchitecture: {}\nMaintainer: t <t@example.org>\n",
+                host_package_arch()
+            );
+            let path = build_deb(
+                src.path(),
+                &name,
+                &control,
+                &[],
+                &[E::File("opt/Foo/foo", &elf, 0o755)],
+            );
+            forge.publish(version, vec![(name, std::fs::read(path).unwrap())]);
+        };
+
+        publish("1.0.0");
+        let plan = engine
+            .inspect("https://github.com/o/r", AddOpts::default())
+            .unwrap();
+        let id = engine.install(plan).unwrap().id;
+        publish("2.0.0");
+        assert_eq!(engine.update(&id).unwrap(), Some("2.0.0".into()));
+        let current = layout.apps.join(&id).join("current");
+        assert_eq!(std::fs::read_link(&current).unwrap(), Path::new("2.0.0"));
+
+        assert_eq!(engine.rollback(&id).unwrap(), "1.0.0");
+        assert_eq!(std::fs::read_link(&current).unwrap(), Path::new("1.0.0"));
+    }
+}

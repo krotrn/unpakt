@@ -2,14 +2,14 @@ use regex::Regex;
 
 use crate::error::{Error, Result};
 use crate::host::Host;
-use crate::model::{Arch, Asset};
+use crate::model::{Arch, Asset, FormatKind};
 
 const TARBALL_SUFFIXES: [&str; 8] = [
     ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.zst", ".tar.bz2", ".tbz2", ".tar",
 ];
 
 /// Checksum and signature companions, plus extensions of other platforms' installers.
-const REJECTED_SUFFIXES: [&str; 13] = [
+const REJECTED_SUFFIXES: [&str; 11] = [
     ".sha256",
     ".sha256sum",
     ".sha512",
@@ -21,8 +21,6 @@ const REJECTED_SUFFIXES: [&str; 13] = [
     ".msi",
     ".dmg",
     ".apk",
-    ".pkg.tar.zst",
-    ".pkg.tar.xz",
 ];
 
 const REJECTED_NAME_PARTS: [&str; 2] = ["sha256sums", "checksums"];
@@ -58,10 +56,36 @@ const OTHER_ARCH_TOKENS: &[&str] = &[
     "sparc64",
 ];
 
+/// The format an asset name denotes, or `None` for anything unrecognized
+/// (including source rpms).
+pub fn asset_format(name: &str) -> Option<FormatKind> {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".appimage") {
+        Some(FormatKind::AppImage)
+    } else if lower.ends_with(".pkg.tar.zst") || lower.ends_with(".pkg.tar.xz") {
+        Some(FormatKind::Pacman)
+    } else if lower.ends_with(".src.rpm") {
+        None
+    } else if lower.ends_with(".rpm") {
+        Some(FormatKind::Rpm)
+    } else if lower.ends_with(".deb") {
+        Some(FormatKind::Deb)
+    } else if TARBALL_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        Some(FormatKind::Tarball)
+    } else {
+        None
+    }
+}
+
 /// Scores an asset name for `host`, or returns `None` when the name must be rejected.
 /// Rejected names are checksums, other OSes or architectures, unrecognized formats,
-/// and names that do not match `pattern`.
-pub fn score_asset(name: &str, host: &Host, pattern: Option<&Regex>) -> Option<i32> {
+/// formats other than `format`, and names that do not match `pattern`.
+pub fn score_asset(
+    name: &str,
+    host: &Host,
+    pattern: Option<&Regex>,
+    format: Option<FormatKind>,
+) -> Option<i32> {
     if pattern.is_some_and(|re| !re.is_match(name)) {
         return None;
     }
@@ -78,18 +102,26 @@ pub fn score_asset(name: &str, host: &Host, pattern: Option<&Regex>) -> Option<i
         return None;
     }
 
-    let mut score = if lower.ends_with(".appimage") {
-        30
-    } else if TARBALL_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
-        20
-    } else {
+    let kind = asset_format(name)?;
+    if format.is_some_and(|f| f != kind) {
         return None;
+    }
+    let mut score = match kind {
+        FormatKind::AppImage => 30,
+        FormatKind::Tarball => 20,
+        _ if kind.family() == host.family() => 15,
+        _ => 10,
     };
-    if host
-        .arch
-        .aliases()
-        .iter()
-        .any(|alias| tokens.iter().any(|t| t.as_str() == *alias))
+    // Packages carry their architecture in metadata and foreign ones are already
+    // rejected above, so an arch token must not lift a package over an AppImage
+    // or tarball.
+    let is_package = kind.family().is_some();
+    if !is_package
+        && host
+            .arch
+            .aliases()
+            .iter()
+            .any(|alias| tokens.iter().any(|t| t.as_str() == *alias))
     {
         score += 40;
     }
@@ -100,10 +132,15 @@ pub fn score_asset(name: &str, host: &Host, pattern: Option<&Regex>) -> Option<i
 }
 
 /// The best-scoring asset for `host`. Ties keep the earliest asset.
-pub fn choose<'a>(assets: &'a [Asset], host: &Host, pattern: Option<&Regex>) -> Result<&'a Asset> {
+pub fn choose<'a>(
+    assets: &'a [Asset],
+    host: &Host,
+    pattern: Option<&Regex>,
+    format: Option<FormatKind>,
+) -> Result<&'a Asset> {
     let mut best: Option<(i32, &Asset)> = None;
     for asset in assets {
-        let Some(score) = score_asset(&asset.name, host, pattern) else {
+        let Some(score) = score_asset(&asset.name, host, pattern, format) else {
             continue;
         };
         if best.is_none_or(|(top, _)| score > top) {
@@ -111,11 +148,15 @@ pub fn choose<'a>(assets: &'a [Asset], host: &Host, pattern: Option<&Regex>) -> 
         }
     }
     best.map(|(_, asset)| asset).ok_or_else(|| {
-        let names: Vec<&str> = assets.iter().map(|a| a.name.as_str()).collect();
-        Error::NotFound(format!(
-            "no release asset matches this host: {}",
-            names.join(", ")
-        ))
+        let names = assets
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match format {
+            Some(f) => Error::NotFound(format!("no {} asset in this release: {names}", f.as_str())),
+            None => Error::NotFound(format!("no release asset matches this host: {names}")),
+        }
     })
 }
 
@@ -186,12 +227,89 @@ mod tests {
         }
     }
 
+    fn host_of(os_id: &str) -> Host {
+        Host {
+            os_id: Some(os_id.to_string()),
+            ..x86_host()
+        }
+    }
+
+    #[test]
+    fn chooses_package_assets() {
+        let pick = |host: &Host, names: &[&str]| {
+            choose(&assets(names), host, None, None).map(|a| a.name.clone())
+        };
+        let arch = host_of("arch");
+        let debrpm = ["app_1.0_amd64.deb", "app-1.0.x86_64.rpm"];
+        assert_eq!(
+            pick(&arch, &["app.AppImage", "app_1.0_amd64.deb"]).unwrap(),
+            "app.AppImage"
+        );
+        assert_eq!(pick(&arch, &debrpm).unwrap(), "app_1.0_amd64.deb");
+        assert_eq!(
+            pick(&host_of("fedora"), &debrpm).unwrap(),
+            "app-1.0.x86_64.rpm"
+        );
+        assert_eq!(
+            pick(
+                &host_of("ubuntu"),
+                &["app-1.0.x86_64.rpm", "app_1.0_amd64.deb"]
+            )
+            .unwrap(),
+            "app_1.0_amd64.deb"
+        );
+        assert!(matches!(
+            pick(&arch, &["app-1.0.src.rpm"]),
+            Err(Error::NotFound(_))
+        ));
+        assert_eq!(
+            pick(&arch, &["app_1.0_arm64.deb", "app_1.0_amd64.deb"]).unwrap(),
+            "app_1.0_amd64.deb"
+        );
+        assert_eq!(
+            pick(&arch, &["app-1.0-1-x86_64.pkg.tar.zst", "app.tar.gz"]).unwrap(),
+            "app.tar.gz"
+        );
+        assert_eq!(
+            pick(&arch, &["app-1.0-1-any.pkg.tar.zst"]).unwrap(),
+            "app-1.0-1-any.pkg.tar.zst"
+        );
+    }
+
+    #[test]
+    fn format_filter_restricts() {
+        let host = host_of("arch");
+        let list = assets(&["app.AppImage", "app.tar.gz"]);
+        assert_eq!(
+            choose(&list, &host, None, Some(FormatKind::Tarball))
+                .unwrap()
+                .name,
+            "app.tar.gz"
+        );
+        match choose(&list, &host, None, Some(FormatKind::Deb)) {
+            Err(Error::NotFound(m)) => assert!(m.contains("deb"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn asset_format_names() {
+        assert_eq!(asset_format("A.AppImage"), Some(FormatKind::AppImage));
+        assert_eq!(asset_format("a.pkg.tar.zst"), Some(FormatKind::Pacman));
+        assert_eq!(asset_format("a.pkg.tar.xz"), Some(FormatKind::Pacman));
+        assert_eq!(asset_format("a.src.rpm"), None);
+        assert_eq!(asset_format("a.rpm"), Some(FormatKind::Rpm));
+        assert_eq!(asset_format("a.deb"), Some(FormatKind::Deb));
+        assert_eq!(asset_format("a.tar.gz"), Some(FormatKind::Tarball));
+        assert_eq!(asset_format("a.zip"), None);
+    }
+
     #[test]
     fn chooses_assets() {
         // host x86_64
         let host = x86_host();
         let pick = |names: &[&str], pat: Option<&Regex>| {
-            choose(&assets(names), &host, pat).map(|a| a.name.clone())
+            choose(&assets(names), &host, pat, None).map(|a| a.name.clone())
         };
         assert_eq!(
             pick(
@@ -253,13 +371,12 @@ mod tests {
             "app-arm64.tar.gz",
             "app-i686.tar.gz",
             "app-x86_64.zsync",
-            "app-x86_64.pkg.tar.zst",
             "app-x86_64.AppImage.sha256",
-            "app-x86_64.deb",
+            "app-x86_64.src.rpm",
             "app-x86_64.zip",
             "checksums.txt",
         ] {
-            assert_eq!(score_asset(name, &host, None), None, "{name}");
+            assert_eq!(score_asset(name, &host, None, None), None, "{name}");
         }
     }
 
@@ -272,20 +389,26 @@ mod tests {
             "tool-linux-x86.tar.gz",
             "tool-riscv64.tar.gz",
             "tool-armv7l.tar.gz",
-            "pkg-1.0-1-x86_64.pkg.tar.xz",
+            "pkg-1.0-1-aarch64.pkg.tar.xz",
         ] {
             let list = assets(&[name]);
-            let result = choose(&list, &host, None);
+            let result = choose(&list, &host, None, None);
             assert!(matches!(result, Err(Error::NotFound(_))), "{name}");
         }
-        assert_eq!(score_asset("tool-x86_64.tar.gz", &host, None), Some(60));
+        assert_eq!(
+            score_asset("tool-x86_64.tar.gz", &host, None, None),
+            Some(60)
+        );
     }
 
     #[test]
     fn arch_tokens_match_on_boundaries_only() {
         let host = x86_host();
-        assert_eq!(score_asset("app-x64.tar.gz", &host, None), Some(60));
-        assert_eq!(score_asset("APP-X86-64.TAR.GZ", &host, None), Some(60));
-        assert_eq!(score_asset("app-ax64b.tar.gz", &host, None), Some(20));
+        assert_eq!(score_asset("app-x64.tar.gz", &host, None, None), Some(60));
+        assert_eq!(
+            score_asset("APP-X86-64.TAR.GZ", &host, None, None),
+            Some(60)
+        );
+        assert_eq!(score_asset("app-ax64b.tar.gz", &host, None, None), Some(20));
     }
 }

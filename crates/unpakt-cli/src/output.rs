@@ -8,7 +8,9 @@ const RUNNER_UPS: usize = 3;
 /// parentheses when that differs.
 fn version_text(label: &str, raw: Option<&str>) -> String {
     match raw {
-        Some(raw) if raw != label => format!("{label} ({raw})"),
+        Some(raw) if raw != label && !label.starts_with(&format!("{raw}+")) => {
+            format!("{label} ({raw})")
+        }
         _ => label.to_string(),
     }
 }
@@ -200,6 +202,10 @@ mod tests {
     fn matching_or_missing_raw_version_shows_the_label_only() {
         assert_eq!(version_text("0.12.6", Some("0.12.6")), "0.12.6");
         assert_eq!(version_text("ab12cd34ef56", None), "ab12cd34ef56");
+        assert_eq!(
+            version_text("1.0+ab12cd34ef56", Some("1.0")),
+            "1.0+ab12cd34ef56"
+        );
     }
 
     #[test]

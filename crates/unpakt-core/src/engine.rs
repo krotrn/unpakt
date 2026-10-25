@@ -125,7 +125,6 @@ pub struct InstallPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alternative {
     pub asset: String,
-    pub url: String,
     pub format: FormatKind,
 }
 
@@ -274,6 +273,31 @@ fn bin_link_name(index: &PayloadIndex, entry: &Path) -> Option<String> {
         .filter_map(|link| link.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .find(|n| validate_command(n).is_ok())
+}
+
+/// An update refusal: `message`, the blocking findings (only those tagged
+/// `only`, when given), and the release's portable alternative, if any.
+fn update_refusal(
+    mut message: String,
+    verdict: &Verdict,
+    only: Option<&[&str]>,
+    p: &InstallPlan,
+) -> String {
+    for finding in verdict
+        .findings()
+        .iter()
+        .filter(|f| !f.note && only.is_none_or(|tags| tags.contains(&f.tag)))
+    {
+        message.push_str("\n  - ");
+        message.push_str(&finding.detail);
+    }
+    if let Some(a) = &p.alternative {
+        message.push_str(&format!(
+            "\nThis release also has {}, which may avoid these problems; switching to it means removing the app and adding that file.",
+            a.asset
+        ));
+    }
+    message
 }
 
 fn join_tags(tags: &std::collections::BTreeSet<&'static str>) -> String {
@@ -624,9 +648,14 @@ impl Engine {
             SourceKind::LocalFile => payload.version.as_deref(),
             SourceKind::DirectUrl | SourceKind::Github => release.version.as_deref(),
         };
-        let label = match label_version {
-            Some(v) => version_label(v),
-            None => sha256_prefix(&canonical, &self.cancel)?,
+        let label = match (label_version, payload.version.as_deref()) {
+            (Some(v), _) => version_label(v),
+            // A download without a version in its name: the content hash tells
+            // rebuilds apart, the package's own version makes it readable.
+            (None, Some(v)) if payload.package.is_some() => {
+                version_label(&format!("{v}+{}", sha256_prefix(&canonical, &self.cancel)?))
+            }
+            (None, _) => sha256_prefix(&canonical, &self.cancel)?,
         };
 
         let entry = match &opts.entry {
@@ -676,7 +705,6 @@ impl Engine {
                         .ok()
                         .map(|a| Alternative {
                             asset: a.name.clone(),
-                            url: a.url.clone(),
                             format: kind,
                         })
                 })
@@ -958,9 +986,11 @@ impl Engine {
         }
         let mut accepted_tags: Option<std::collections::BTreeSet<String>> = None;
         match &p.compat {
-            Some(Verdict::NeedsContainer(_)) => {
-                let message = p.blocked().unwrap_or_default();
-                return Err(Error::Refused(format!("{message}; current version kept")));
+            Some(verdict @ Verdict::NeedsContainer(_)) => {
+                let message = format!(
+                    "{id} {label} needs newer system libraries than this machine has; current version kept"
+                );
+                return Err(Error::Refused(update_refusal(message, verdict, None, &p)));
             }
             Some(verdict @ Verdict::Risky(_)) => {
                 let mut accepted: std::collections::BTreeSet<String> = self
@@ -979,9 +1009,14 @@ impl Engine {
                     .filter(|t| !accepted.contains(*t))
                     .collect();
                 if !new.is_empty() && !allow_risky {
-                    return Err(Error::NeedsAcceptance(format!(
-                        "{id} {label} adds new compatibility problems ({}); current version kept",
-                        new.join(", ")
+                    let message = format!(
+                        "{id} {label} adds new compatibility problems; current version kept"
+                    );
+                    return Err(Error::NeedsAcceptance(update_refusal(
+                        message,
+                        verdict,
+                        Some(&new),
+                        &p,
                     )));
                 }
                 p.opts.allow_risky = true;

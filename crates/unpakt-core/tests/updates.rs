@@ -852,13 +852,20 @@ mod package_updates {
         );
         let id = install_risky(&mut engine);
 
+        let portable = tarball(src.path(), "2.0");
+        let portable_name = portable.0.clone();
         forge.publish(
             "2.0.0",
-            vec![deb(src.path(), "2.0.0", true, &["libnotthere.so.9"])],
+            vec![
+                deb(src.path(), "2.0.0", true, &["libnotthere.so.9"]),
+                portable,
+            ],
         );
         match engine.update(&id) {
             Err(Error::NeedsAcceptance(m)) => {
-                assert!(m.contains("system-integration"), "{m}");
+                assert!(m.contains("usr/lib/systemd/system/"), "{m}");
+                assert!(!m.contains("libnotthere"), "accepted finding repeated: {m}");
+                assert!(m.contains(&portable_name), "{m}");
                 assert!(!m.contains("--"), "front-end flags leaked into {m}");
             }
             other => panic!("{other:?}"),

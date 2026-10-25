@@ -40,7 +40,9 @@ pub fn fraction(done: u64, total: Option<u64>) -> Option<f64> {
 /// parentheses when that differs. Same rule as the CLI summary.
 fn version_text(label: &str, raw: Option<&str>) -> String {
     match raw {
-        Some(raw) if raw != label => format!("{label} ({raw})"),
+        Some(raw) if raw != label && !label.starts_with(&format!("{raw}+")) => {
+            format!("{label} ({raw})")
+        }
         _ => label.to_string(),
     }
 }

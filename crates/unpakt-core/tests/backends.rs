@@ -281,3 +281,125 @@ fn extract_skips_pax_global_header_with_strip_prefix() {
         ELF
     );
 }
+
+mod packages {
+    use super::common::{E, RpmTags, build_elf, build_rpm, electron_like, host_rpm_arch};
+    use super::{layout, plan_for};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use unpakt_core::backend::{Installed, for_payload};
+    use unpakt_core::model::FormatKind;
+    use unpakt_core::{Error, Layout, Txn};
+
+    fn install(root: &Path, artifact: PathBuf) -> unpakt_core::Result<(Layout, Installed)> {
+        let plan = plan_for(artifact, "foo");
+        let l = layout(root);
+        let backend = for_payload(&plan.payload).expect("a backend for packages");
+        assert_eq!(backend.id(), "extract");
+        let mut txn = Txn::new();
+        let done = backend.install(&plan, &l, &mut txn)?;
+        txn.commit();
+        Ok((l, done))
+    }
+
+    #[test]
+    fn deb_extracts_into_version_dir_with_rebased_links() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let deb = electron_like(src.path(), FormatKind::Deb);
+        let (l, done) = install(root.path(), deb).unwrap();
+        let dir = &done.version_dir;
+
+        assert_eq!(dir, &l.apps.join("foo/1.0"));
+        assert!(dir.join("opt/Foo/foo").is_file());
+        assert_eq!(done.entry, PathBuf::from("opt/Foo/foo"));
+        assert_eq!(
+            std::fs::read_link(dir.join("usr/bin/foo")).unwrap(),
+            PathBuf::from("../../opt/Foo/foo")
+        );
+        let mode = std::fs::metadata(dir.join("opt/Foo/chrome-sandbox"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o6000, 0);
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    fn assert_extracted(format: FormatKind) {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let pkg = electron_like(src.path(), format);
+        let (_, done) = install(root.path(), pkg).unwrap();
+        let file = done.version_dir.join("opt/Foo/foo");
+        assert!(file.is_file());
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111);
+        assert_eq!(
+            std::fs::read_link(done.version_dir.join("usr/bin/foo")).unwrap(),
+            PathBuf::from("../../opt/Foo/foo")
+        );
+    }
+
+    #[test]
+    fn rpm_extracts() {
+        assert_extracted(FormatKind::Rpm);
+    }
+
+    #[test]
+    fn pacman_extracts() {
+        assert_extracted(FormatKind::Pacman);
+    }
+
+    fn rpm_with(src: &Path, extra: &[E]) -> PathBuf {
+        let elf = build_elf(&["libc.so.6"], None, &[], &[]);
+        let mut data = vec![
+            E::File("opt/Foo/foo", &elf, 0o755),
+            E::Link("usr/bin/foo", "/opt/Foo/foo"),
+        ];
+        data.extend_from_slice(extra);
+        build_rpm(
+            src,
+            "foo-1.2.3-1.pkg.rpm",
+            RpmTags {
+                name: "foo",
+                version: "1.2.3",
+                release: "1",
+                arch: host_rpm_arch(),
+                post: None,
+                requires: &[],
+                source: false,
+            },
+            &data,
+        )
+    }
+
+    #[test]
+    fn package_link_to_missing_target_is_skipped() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let rpm = rpm_with(
+            src.path(),
+            &[E::Link("usr/lib/x.so", "/usr/lib/libsystem.so")],
+        );
+        let (_, done) = install(root.path(), rpm).unwrap();
+        assert!(done.version_dir.join("opt/Foo/foo").is_file());
+        assert!(std::fs::symlink_metadata(done.version_dir.join("usr/lib/x.so")).is_err());
+    }
+
+    #[test]
+    fn cpio_traversal_refused() {
+        let src = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let rpm = rpm_with(src.path(), &[E::File("../evil", b"x", 0o644)]);
+        let artifact = unpakt_core::model::Artifact {
+            file_name: "foo.rpm".into(),
+            path: rpm,
+        };
+        let result = unpakt_core::format::detect(&artifact)
+            .and_then(|f| f.inspect(&artifact))
+            .map(|_| ());
+        assert!(matches!(result, Err(Error::Refused(_))), "{result:?}");
+        assert!(!root.path().join("evil").exists());
+        assert!(!src.path().join("evil").exists());
+    }
+}

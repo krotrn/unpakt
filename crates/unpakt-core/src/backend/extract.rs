@@ -1,5 +1,4 @@
 use std::fs::{self, OpenOptions};
-use std::io::Read;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,7 +9,9 @@ use super::{Backend, Installed, Plan, copy_cancellable, version_dir};
 use crate::cancel::Cancel;
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::open_tar;
-use crate::model::{FormatKind, Payload};
+use crate::format::package::resolve_in_payload;
+use crate::format::stream::{StreamEntry, StreamKind, for_each_entry};
+use crate::model::{FormatKind, PackageMeta, Payload, PayloadIndex};
 use crate::{Layout, Txn};
 
 pub struct Extract;
@@ -21,7 +22,10 @@ impl Backend for Extract {
     }
 
     fn applicable(&self, p: &Payload) -> bool {
-        p.format == FormatKind::Tarball
+        matches!(
+            p.format,
+            FormatKind::Tarball | FormatKind::Deb | FormatKind::Rpm | FormatKind::Pacman
+        )
     }
 
     fn install(&self, plan: &Plan, layout: &Layout, txn: &mut Txn) -> Result<Installed> {
@@ -36,12 +40,16 @@ impl Backend for Extract {
         txn.create_dir_all(&app_dir)?;
         txn.create_dir_new(&staging)?;
 
-        unpack(
-            &plan.artifact.path,
-            &staging,
-            plan.payload.strip_prefix.as_deref(),
-            &txn.cancel().clone(),
-        )?;
+        let cancel = txn.cancel().clone();
+        match &plan.payload.package {
+            Some(meta) => unpack_package(meta, &staging, &cancel)?,
+            None => unpack(
+                &plan.artifact.path,
+                &staging,
+                plan.payload.strip_prefix.as_deref(),
+                &cancel,
+            )?,
+        }
         txn.rename(&staging, &dir)?;
         Ok(Installed {
             version_dir: dir,
@@ -139,6 +147,129 @@ fn symlink_target_is_inside(rel: &Path, target: &Path) -> bool {
     up <= depth
 }
 
+/// How symlink targets are treated while unpacking.
+enum LinkPolicy<'a> {
+    /// Archive links must stay inside the tree; anything else is refused.
+    Strict,
+    /// Absolute targets are rewritten to relative ones inside the tree when the
+    /// payload index resolves them; unresolvable or escaping links are skipped.
+    Rebase(&'a PayloadIndex),
+}
+
+/// The link target to create for a symlink at `rel`, or `None` to skip it.
+fn link_target(rel: &Path, target: &Path, links: &LinkPolicy<'_>) -> Result<Option<PathBuf>> {
+    let inside = symlink_target_is_inside(rel, target);
+    let index = match links {
+        LinkPolicy::Strict if inside => return Ok(Some(target.to_path_buf())),
+        LinkPolicy::Strict => {
+            return Err(unsafe_path(format!(
+                "{} -> {}",
+                rel.display(),
+                target.display()
+            )));
+        }
+        LinkPolicy::Rebase(index) => index,
+    };
+    if !target.has_root() {
+        if inside {
+            return Ok(Some(target.to_path_buf()));
+        }
+        tracing::warn!(link = %rel.display(), target = %target.display(), "skipping symlink that leaves the package");
+        return Ok(None);
+    }
+    let mut dest: Vec<&std::ffi::OsStr> = Vec::new();
+    for c in target.components() {
+        match c {
+            Component::Normal(n) => dest.push(n),
+            Component::ParentDir if dest.pop().is_some() => {}
+            Component::RootDir | Component::CurDir => {}
+            _ => {
+                tracing::warn!(link = %rel.display(), target = %target.display(), "skipping symlink that leaves the package");
+                return Ok(None);
+            }
+        }
+    }
+    let dest: PathBuf = dest.into_iter().collect();
+    if resolve_in_payload(index, &dest).is_none() {
+        tracing::warn!(link = %rel.display(), target = %target.display(), "skipping symlink to a file the package does not contain");
+        return Ok(None);
+    }
+    let from: Vec<_> = rel
+        .parent()
+        .map(|p| p.components().collect())
+        .unwrap_or_default();
+    let to: Vec<_> = dest.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut out = PathBuf::new();
+    for _ in common..from.len() {
+        out.push("..");
+    }
+    for c in &to[common..] {
+        out.push(c);
+    }
+    Ok(Some(out))
+}
+
+/// Writes one entry below `staging`. `entry.path` and a hard link's target are
+/// already relative to the tree root.
+fn write_entry(
+    staging: &Path,
+    entry: StreamEntry<'_>,
+    links: &LinkPolicy<'_>,
+    cancel: &Cancel,
+) -> Result<()> {
+    cancel.check()?;
+    let StreamEntry {
+        path: rel,
+        kind,
+        mode,
+        reader,
+    } = entry;
+    let dest = staging.join(&rel);
+    let mode = mode & 0o777;
+
+    match kind {
+        StreamKind::Dir => {
+            prepare_parents(staging, &rel)?;
+            match fs::symlink_metadata(&dest) {
+                Ok(m) if m.file_type().is_dir() => {}
+                Ok(_) => return Err(unsafe_path(rel.display())),
+                Err(_) => fs::create_dir(&dest).at(&dest)?,
+            }
+            fs::set_permissions(&dest, fs::Permissions::from_mode(mode | 0o700)).at(&dest)?;
+        }
+        StreamKind::File => {
+            prepare_parents(staging, &rel)?;
+            remove_existing_file(&dest, &rel)?;
+            let mut out = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(mode)
+                .open(&dest)
+                .at(&dest)?;
+            copy_cancellable(reader, &mut out, cancel, &dest)?;
+            drop(out);
+            fs::set_permissions(&dest, fs::Permissions::from_mode(mode)).at(&dest)?;
+        }
+        StreamKind::Symlink(target) => {
+            let Some(target) = link_target(&rel, &target, links)? else {
+                return Ok(());
+            };
+            prepare_parents(staging, &rel)?;
+            remove_existing_file(&dest, &rel)?;
+            std::os::unix::fs::symlink(&target, &dest).at(&dest)?;
+        }
+        StreamKind::HardLink(source_rel) => {
+            prepare_parents(staging, &rel)?;
+            let source = staging.join(&source_rel);
+            check_regular_inside(staging, &source_rel)?;
+            remove_existing_file(&dest, &rel)?;
+            fs::hard_link(&source, &dest).at(&dest)?;
+        }
+    }
+    Ok(())
+}
+
 fn unpack(
     archive_path: &Path,
     staging: &Path,
@@ -150,9 +281,9 @@ fn unpack(
     for entry in entries {
         cancel.check()?;
         let mut entry = entry.at(archive_path)?;
-        let kind = entry.header().entry_type();
+        let tar_kind = entry.header().entry_type();
         if !matches!(
-            kind,
+            tar_kind,
             EntryType::Directory
                 | EntryType::Regular
                 | EntryType::Continuous
@@ -160,13 +291,13 @@ fn unpack(
                 | EntryType::Link
         ) {
             if !matches!(
-                kind,
+                tar_kind,
                 EntryType::XGlobalHeader
                     | EntryType::XHeader
                     | EntryType::GNULongName
                     | EntryType::GNULongLink
             ) {
-                tracing::warn!(kind = ?kind, "skipping special archive entry");
+                tracing::warn!(kind = ?tar_kind, "skipping special archive entry");
             }
             continue;
         }
@@ -174,67 +305,45 @@ fn unpack(
         let Some(rel) = destination(&raw, strip)? else {
             continue;
         };
-        let dest = staging.join(&rel);
-        let mode = entry.header().mode().at(archive_path)? & 0o777;
-
-        match kind {
-            EntryType::Directory => {
-                prepare_parents(staging, &rel)?;
-                match fs::symlink_metadata(&dest) {
-                    Ok(m) if m.file_type().is_dir() => {}
-                    Ok(_) => return Err(unsafe_path(rel.display())),
-                    Err(_) => fs::create_dir(&dest).at(&dest)?,
-                }
-                fs::set_permissions(&dest, fs::Permissions::from_mode(mode | 0o700)).at(&dest)?;
-            }
-            EntryType::Regular | EntryType::Continuous => {
-                prepare_parents(staging, &rel)?;
-                remove_existing_file(&dest, &rel)?;
-                let mut out = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(mode)
-                    .open(&dest)
-                    .at(&dest)?;
-                copy_cancellable(&mut entry as &mut dyn Read, &mut out, cancel, &dest)?;
-                drop(out);
-                fs::set_permissions(&dest, fs::Permissions::from_mode(mode)).at(&dest)?;
-            }
-            EntryType::Symlink => {
+        let mode = entry.header().mode().at(archive_path)?;
+        let kind = match tar_kind {
+            EntryType::Directory => StreamKind::Dir,
+            EntryType::Symlink | EntryType::Link => {
                 let target = entry
                     .link_name()
                     .at(archive_path)?
                     .ok_or_else(|| unsafe_path(format!("{} has no link target", rel.display())))?
                     .into_owned();
-                if !symlink_target_is_inside(&rel, &target) {
-                    return Err(unsafe_path(format!(
-                        "{} -> {}",
-                        rel.display(),
-                        target.display()
-                    )));
+                if tar_kind == EntryType::Symlink {
+                    StreamKind::Symlink(target)
+                } else {
+                    let source = destination(&target, strip)?
+                        .ok_or_else(|| unsafe_path(target.display()))?;
+                    StreamKind::HardLink(source)
                 }
-                prepare_parents(staging, &rel)?;
-                remove_existing_file(&dest, &rel)?;
-                std::os::unix::fs::symlink(&target, &dest).at(&dest)?;
             }
-            EntryType::Link => {
-                let target = entry
-                    .link_name()
-                    .at(archive_path)?
-                    .ok_or_else(|| unsafe_path(format!("{} has no link target", rel.display())))?
-                    .into_owned();
-                let source_rel =
-                    destination(&target, strip)?.ok_or_else(|| unsafe_path(target.display()))?;
-                prepare_parents(staging, &rel)?;
-                let source = staging.join(&source_rel);
-                check_regular_inside(staging, &source_rel)?;
-                remove_existing_file(&dest, &rel)?;
-                fs::hard_link(&source, &dest).at(&dest)?;
-            }
-            _ => unreachable!("other entry types were skipped above"),
-        }
+            _ => StreamKind::File,
+        };
+        write_entry(
+            staging,
+            StreamEntry {
+                path: rel,
+                kind,
+                mode,
+                reader: &mut entry,
+            },
+            &LinkPolicy::Strict,
+            cancel,
+        )?;
     }
     Ok(())
+}
+
+fn unpack_package(meta: &PackageMeta, staging: &Path, cancel: &Cancel) -> Result<()> {
+    let links = LinkPolicy::Rebase(&meta.index);
+    for_each_entry(&meta.data, |entry| {
+        write_entry(staging, entry, &links, cancel)
+    })
 }
 
 /// A hardlink source must be an already-extracted regular file whose

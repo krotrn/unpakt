@@ -9,7 +9,8 @@ not need to know any programming.
    release and looks at the files attached to it.
 2. **It picks the right file.** It ignores checksums, signatures and files for
    other systems or processors (Windows, macOS, 32-bit, ARM). Among what is
-   left it prefers an AppImage built for x86_64 Linux, then a tarball.
+   left it prefers an AppImage built for x86_64 Linux, then a tarball, then a
+   `.deb`, `.rpm` or pacman package (one for your own distribution first).
 3. **It downloads the file** to a temporary folder in `~/.cache/unpakt`.
 4. **It looks inside, without running anything.** unpakt reads the file to find
    the app's name, version, icon, launcher information and the program to
@@ -23,6 +24,38 @@ not need to know any programming.
 
 If you give a download URL or a file instead, the steps are the same minus the
 GitHub lookup.
+
+## Installing a `.deb`, `.rpm` or pacman package
+
+A package is made for one distribution and expects to be installed by its
+package manager, as root. unpakt does something different and safer:
+
+1. **It reads the package without running anything.** That includes the
+   package's install scripts: unpakt reads them as text and never runs them.
+2. **It checks whether the app can run here.** It looks at every library the
+   program needs and checks that your system has it, in a new enough version.
+   It also looks for paths the app expects in `/opt` or `/usr/share`, files
+   meant for system folders (services, device rules, kernel modules), and
+   install scripts that would create user accounts or change kernel settings.
+3. **It tells you the result**, one of three:
+   - `ok`: the app is expected to run. Any notes are shown, but nothing is
+     asked of you.
+   - `risky`: something may stop it from running. unpakt lists what, and
+     installs only if you accept (`--allow-risky`, or Install anyway in the
+     app). It remembers what you accepted, so a later update only asks again
+     when something new turns up.
+   - `needs-container`: the app needs newer system libraries than your
+     computer has. unpakt cannot fix that from your home folder, so it does not
+     install it.
+4. **It unpacks the files into the app's own folder** under
+   `~/.local/share/unpakt/apps/`, rewrites links that pointed at `/opt` or
+   `/usr` so they point inside that folder, and adds the launcher entry, icon
+   and command as for any other app.
+
+Nothing goes into `/usr`, `/opt` or `/etc`, and your package manager never
+sees the app, so it cannot conflict with the system's own packages. If you do
+want it installed system-wide, unpakt prints the `apt`, `dnf` or `pacman`
+command for you to run yourself.
 
 ## Where things go
 
@@ -92,6 +125,7 @@ the GUI while a command is running), it waits for the first and then goes on.
   and `~/.cache`. It does not touch `/usr`, `/opt` or `/etc`.
 - It does not run the apps it installs, other than asking the desktop to
   refresh its menu (`update-desktop-database`, if you have it).
+- It never runs a package's install scripts.
 - It does not run in the background and does not start with your session.
 - It does not verify the signatures of the apps it installs yet, so install
   apps from sources you trust.

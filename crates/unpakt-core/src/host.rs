@@ -61,12 +61,25 @@ fn family_of(id: &str) -> Option<PackageFamily> {
 
 /// The command that installs `file` system-wide with the host's package manager.
 pub fn native_install_hint(family: PackageFamily, file: &Path) -> String {
-    let path = file.to_string_lossy();
+    install_command(family, &file.to_string_lossy())
+}
+
+/// The hint for a package that lives at `url` and is not on disk yet: where to
+/// get it, then the command to run on the downloaded file.
+pub fn native_download_hint(family: PackageFamily, url: &str, file_name: &str) -> String {
+    let local = format!("./{file_name}");
+    format!(
+        "Download {url}, then run: {}",
+        install_command(family, &local)
+    )
+}
+
+fn install_command(family: PackageFamily, path: &str) -> String {
     let safe = path
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || "/._+-".contains(c));
     let path = if safe {
-        path.into_owned()
+        path.to_string()
     } else {
         format!("'{}'", path.replace('\'', "'\\''"))
     };

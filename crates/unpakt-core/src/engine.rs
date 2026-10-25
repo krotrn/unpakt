@@ -18,14 +18,16 @@ use crate::compat::{Verdict, check as check_compat};
 use crate::desktop::{DesktopEntry, exec_argv0};
 use crate::error::{Error, IoResultExt, Result};
 use crate::format::detect;
-use crate::host::{Host, native_install_hint};
+use crate::format::package::resolve_in_payload;
+use crate::host::{Host, native_download_hint, native_install_hint};
 use crate::http::Http;
 use crate::integrate::{IntegrateReq, disintegrate, integrate};
 use crate::journal::{Expect, Intent};
 use crate::lock::{self, WriteLock};
 use crate::manifest::{AppRecord, FileKind, FileRecord, Manifest, VersionRecord};
 use crate::model::{
-    Artifact, EntryCandidate, FormatKind, Icon, Payload, Release, SourceCfg, SourceKind,
+    Artifact, EntryCandidate, FormatKind, Icon, Payload, PayloadIndex, Release, SourceCfg,
+    SourceKind,
 };
 use crate::naming::{slug, validate_command, version_label};
 use crate::progress::{Progress, ProgressFn};
@@ -222,9 +224,16 @@ fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) 
             .as_deref()
             .and_then(|text| DesktopEntry::parse(text).ok())
             .and_then(|d| d.get("Exec").and_then(exec_argv0)),
-        FormatKind::Tarball | FormatKind::Deb | FormatKind::Rpm | FormatKind::Pacman => entry
+        FormatKind::Tarball => entry
             .and_then(|e| e.path.file_name())
             .map(|n| n.to_string_lossy().into_owned()),
+        FormatKind::Deb | FormatKind::Rpm | FormatKind::Pacman => entry.and_then(|e| {
+            payload
+                .package
+                .as_ref()
+                .and_then(|meta| bin_link_name(&meta.index, &e.path))
+                .or_else(|| e.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+        }),
     };
     named
         .and_then(|n| {
@@ -234,6 +243,22 @@ fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) 
         })
         .filter(|n| !["AppRun", "env"].contains(&n.as_str()) && validate_command(n).is_ok())
         .unwrap_or_else(|| id.to_string())
+}
+
+/// The name of a `usr/bin` or `bin` link that points at `entry`, which is what
+/// the package's own users type to start it.
+fn bin_link_name(index: &PayloadIndex, entry: &Path) -> Option<String> {
+    index
+        .links
+        .keys()
+        .filter(|link| {
+            link.parent()
+                .is_some_and(|d| d == Path::new("usr/bin") || d == Path::new("bin"))
+        })
+        .filter(|link| resolve_in_payload(index, link).as_deref() == Some(entry))
+        .filter_map(|link| link.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .find(|n| validate_command(n).is_ok())
 }
 
 fn join_tags(tags: &std::collections::BTreeSet<&'static str>) -> String {
@@ -545,6 +570,16 @@ impl Engine {
         self.emit(Progress::Inspecting);
         self.cancel.check()?;
         let payload = detect(&artifact)?.inspect(&artifact)?;
+        if let Some(wanted) = opts.format
+            && payload.format != wanted
+        {
+            return Err(Error::Refused(format!(
+                "{} is a {} file, not {}",
+                artifact.file_name,
+                payload.format.as_str(),
+                wanted.as_str()
+            )));
+        }
         let backend = for_payload(&payload).ok_or_else(|| {
             Error::Unsupported(format!(
                 "no backend can install a {}",
@@ -614,7 +649,10 @@ impl Engine {
             .package
             .as_ref()
             .filter(|meta| Some(meta.family) == self.host.family())
-            .map(|meta| native_install_hint(meta.family, &canonical));
+            .map(|meta| match source.kind {
+                SourceKind::LocalFile => native_install_hint(meta.family, &canonical),
+                _ => native_download_hint(meta.family, &asset.url, &asset.name),
+            });
         let alternative = if payload.package.is_some() {
             [FormatKind::AppImage, FormatKind::Tarball]
                 .into_iter()
@@ -871,40 +909,6 @@ impl Engine {
         let mut p = self.inspect(&app.source.location, opts)?;
         let _download = self.download_guard(&p.plan.artifact.path);
         let label = p.plan.label.clone();
-        let mut accepted_tags: Option<std::collections::BTreeSet<String>> = None;
-        match &p.compat {
-            Some(Verdict::NeedsContainer(_)) => {
-                let message = p.blocked().unwrap_or_default();
-                return Err(Error::Refused(format!("{message}; current version kept")));
-            }
-            Some(verdict @ Verdict::Risky(_)) => {
-                let mut accepted: std::collections::BTreeSet<String> = self
-                    .manifest
-                    .option(id, "compat.accepted")?
-                    .map(|text| {
-                        text.split(',')
-                            .filter(|t| !t.is_empty())
-                            .map(String::from)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let new: Vec<&str> = verdict
-                    .risk_tags()
-                    .into_iter()
-                    .filter(|t| !accepted.contains(*t))
-                    .collect();
-                if !new.is_empty() && !allow_risky {
-                    return Err(Error::Refused(format!(
-                        "{id} {label} adds new compatibility problems ({}); current version kept. Run `unpakt update {id} --allow-risky` to accept them",
-                        new.join(", ")
-                    )));
-                }
-                p.opts.allow_risky = true;
-                accepted.extend(new.into_iter().map(String::from));
-                accepted_tags = Some(accepted);
-            }
-            _ => {}
-        }
         if let Some(target) = versions.iter().find(|v| v.label == label) {
             let fetched = Release {
                 version: p.plan.payload.version.clone(),
@@ -938,6 +942,40 @@ impl Engine {
             if newer_release(&app, &current, &fetched).is_none() {
                 return Ok(None);
             }
+        }
+        let mut accepted_tags: Option<std::collections::BTreeSet<String>> = None;
+        match &p.compat {
+            Some(Verdict::NeedsContainer(_)) => {
+                let message = p.blocked().unwrap_or_default();
+                return Err(Error::Refused(format!("{message}; current version kept")));
+            }
+            Some(verdict @ Verdict::Risky(_)) => {
+                let mut accepted: std::collections::BTreeSet<String> = self
+                    .manifest
+                    .option(id, "compat.accepted")?
+                    .map(|text| {
+                        text.split(',')
+                            .filter(|t| !t.is_empty())
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let new: Vec<&str> = verdict
+                    .risk_tags()
+                    .into_iter()
+                    .filter(|t| !accepted.contains(*t))
+                    .collect();
+                if !new.is_empty() && !allow_risky {
+                    return Err(Error::Refused(format!(
+                        "{id} {label} adds new compatibility problems ({}); current version kept. Run `unpakt update {id} --allow-risky` to accept them",
+                        new.join(", ")
+                    )));
+                }
+                p.opts.allow_risky = true;
+                accepted.extend(new.into_iter().map(String::from));
+                accepted_tags = Some(accepted);
+            }
+            _ => {}
         }
         let backend = for_payload(&p.plan.payload)
             .ok_or_else(|| Error::Unsupported("no backend can install this package".into()))?;

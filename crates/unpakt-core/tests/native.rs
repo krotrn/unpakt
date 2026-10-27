@@ -157,6 +157,47 @@ fn no_packagekit_extracts_and_says_why() {
 }
 
 #[test]
+fn pacman_package_is_extracted_without_probing() {
+    let pk = fake();
+    pk.0.lock().unwrap().panic_on_probe = true;
+    let host = Host {
+        os_id: Some("arch".into()),
+        os_like: vec![],
+        immutable_root: false,
+        fuse2: true,
+        ..Host::detect()
+    };
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pkg = common::build_pacman(
+        src.path(),
+        "hello-1.0-1-any.pkg.tar.zst",
+        "pkgname = hello\npkgver = 1.0-1\narch = any\n",
+        None,
+        &[common::E::File("opt/hello/hello", b"#!/bin/sh\n", 0o755)],
+        common::Comp::Zst,
+    );
+    let engine = Engine::new(Layout::under(root.path()), host)
+        .unwrap()
+        .with_packagekit(Box::new(pk));
+    let plan = engine
+        .inspect(pkg.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    assert_ne!(plan.route(), Some(Route::Native));
+    assert_eq!(
+        plan.native_skipped.as_deref(),
+        Some("PackageKit cannot install local pacman packages")
+    );
+    assert!(plan.native_hint.unwrap().contains("sudo pacman -U"));
+    let opts = AddOpts {
+        extract: true,
+        ..Default::default()
+    };
+    let plan = engine.inspect(pkg.to_str().unwrap(), opts).unwrap();
+    assert!(plan.native_skipped.is_none());
+}
+
+#[test]
 fn image_based_host_extracts() {
     let host = Host {
         immutable_root: true,

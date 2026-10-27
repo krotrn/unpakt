@@ -65,13 +65,7 @@ case $family in
     # package is installed. Check the packages instead of the exit status.
     pacman -Syu --noconfirm --needed packagekit polkit dbus python binutils libarchive zstd shadow shared-mime-info >/dev/null || true
     pacman -Q packagekit polkit dbus python binutils libarchive zstd shadow shared-mime-info >/dev/null
-    ext=pkg.tar.xz
-    # PackageKit's alpm backend loads a local file with the repository
-    # SigLevel and ignores LocalFileSigLevel, so with the stock
-    # "Required DatabaseOptional" it rejects every unsigned file ("package
-    # missing required signature"), although `pacman -U` accepts it. Vendor
-    # files are unsigned, so signatures are made optional for this run.
-    sed -i 's/^SigLevel .*/SigLevel = Optional/' /etc/pacman.conf
+    ext=pkg.tar.zst
     ;;
   *) echo "unknown family: $family" >&2; exit 64 ;;
 esac
@@ -138,9 +132,6 @@ SPEC
       cp "$work/rpm/RPMS/noarch/$name-$version-1.noarch.rpm" "$dest"
       ;;
     arch)
-      # xz, not zstd: PackageKit's alpm backend lists only gzip and xz tarballs
-      # as installable (MimeTypes: application/x-compressed-tar,
-      # application/x-xz-compressed-tar) and rejects a .pkg.tar.zst with NoSuchFile.
       cat >"$root/.PKGINFO" <<INFO
 pkgname = $name
 pkgver = $version
@@ -149,7 +140,7 @@ arch = any
 size = 1
 INFO
       printf 'post_install() {\n  touch /var/tmp/pk-hello-ran\n}\npost_upgrade() {\n  post_install\n}\n' >"$root/.INSTALL"
-      (cd "$root" && bsdtar --xz -cf "$dest" .PKGINFO .INSTALL usr)
+      (cd "$root" && bsdtar --zstd -cf "$dest" .PKGINFO .INSTALL usr)
       ;;
   esac
 }
@@ -261,51 +252,68 @@ check "binary runs" u --version
 u --help | head -30
 u info --help | head -30
 
-step "add --yes installs through PackageKit"
-new_root
-rm -f /var/tmp/pk-hello-ran
-expect_status "add --yes pk-hello 1.0 exits 0" 0 u add --yes "$(url "pk-hello.$ext")"
-check "native query shows 1.0" test "$(installed_version pk-hello)" = "$(ver 1.0)"
-check "install script ran" test -e /var/tmp/pk-hello-ran
-u info pk-hello | tee "$out"
-check "info shows backend: packagekit" grep -q 'backend: packagekit' "$out"
-home_root=$UNPAKT_ROOT
+if [ "$family" != arch ]; then
+  step "add --yes installs through PackageKit"
+  new_root
+  rm -f /var/tmp/pk-hello-ran
+  expect_status "add --yes pk-hello 1.0 exits 0" 0 u add --yes "$(url "pk-hello.$ext")"
+  check "native query shows 1.0" test "$(installed_version pk-hello)" = "$(ver 1.0)"
+  check "install script ran" test -e /var/tmp/pk-hello-ran
+  u info pk-hello | tee "$out"
+  check "info shows backend: packagekit" grep -q 'backend: packagekit' "$out"
+  home_root=$UNPAKT_ROOT
 
-step "add without consent is refused"
-new_root
-expect_status "add without --yes and no tty exits 2" 2 u add "$(url "pk-other.$ext")"
-check_not "pk-other is not installed" is_installed pk-other
+  step "add without consent is refused"
+  new_root
+  expect_status "add without --yes and no tty exits 2" 2 u add "$(url "pk-other.$ext")"
+  check_not "pk-other is not installed" is_installed pk-other
 
-step "a non-root user without a polkit agent is denied"
-# Polkit asks for administrator authentication to install an untrusted local
-# package; with nobody to ask, PackageKit must report NotAuthorized and
-# unpakt must leave nothing behind.
-useradd -m pkuser
-pkroot=$(mktemp -d /tmp/pkuser-root-XXXXXX)
-chown pkuser: "$pkroot"
-expect_status "add --yes as a non-root user exits 2" 2 \
-  runuser -u pkuser -- env UNPAKT_ROOT="$pkroot" UNPAKT_PACKAGEKIT=1 "$unpakt" add --yes "$(url "pk-other.$ext")"
-check "the refusal says authorization was refused" grep -q 'authorization was refused' "$out"
-check_not "pk-other is not installed" is_installed pk-other
-check "no native journal is left" test -z "$(ls -A "$pkroot/.local/share/unpakt/native" 2>/dev/null)"
+  step "a non-root user without a polkit agent is denied"
+  # Polkit asks for administrator authentication to install an untrusted local
+  # package; with nobody to ask, PackageKit must report NotAuthorized and
+  # unpakt must leave nothing behind.
+  useradd -m pkuser
+  pkroot=$(mktemp -d /tmp/pkuser-root-XXXXXX)
+  chown pkuser: "$pkroot"
+  expect_status "add --yes as a non-root user exits 2" 2 \
+    runuser -u pkuser -- env UNPAKT_ROOT="$pkroot" UNPAKT_PACKAGEKIT=1 "$unpakt" add --yes "$(url "pk-other.$ext")"
+  check "the refusal says authorization was refused" grep -q 'authorization was refused' "$out"
+  check_not "pk-other is not installed" is_installed pk-other
+  check "no native journal is left" test -z "$(ls -A "$pkroot/.local/share/unpakt/native" 2>/dev/null)"
 
-step "update keeps the newer native version"
-UNPAKT_ROOT=$home_root
-export UNPAKT_ROOT
-check "install 2.1 natively" native_install "$work/pk-hello-2.1.$ext"
-restart_packagekit
-cp "$work/pk-hello-2.0.$ext" "$serve/pk-hello.$ext"
-expect_status "update --yes exits 0" 0 u update pk-hello --yes
-check "update said up to date" grep -q 'pk-hello: up to date' "$out"
-check "native version is still 2.1" test "$(installed_version pk-hello)" = "$(ver 2.1)"
-u info pk-hello | tee "$out"
-check "info lists 2.1" grep -q '2\.1' "$out"
+  step "update keeps the newer native version"
+  UNPAKT_ROOT=$home_root
+  export UNPAKT_ROOT
+  check "install 2.1 natively" native_install "$work/pk-hello-2.1.$ext"
+  restart_packagekit
+  cp "$work/pk-hello-2.0.$ext" "$serve/pk-hello.$ext"
+  expect_status "update --yes exits 0" 0 u update pk-hello --yes
+  check "update said up to date" grep -q 'pk-hello: up to date' "$out"
+  check "native version is still 2.1" test "$(installed_version pk-hello)" = "$(ver 2.1)"
+  u info pk-hello | tee "$out"
+  check "info lists 2.1" grep -q '2\.1' "$out"
 
-step "remove --yes removes the package"
-expect_status "remove --yes exits 0" 0 u remove --yes pk-hello
-check_not "pk-hello is gone" is_installed pk-hello
-u list | tee "$out"
-check "list prints nothing" test ! -s "$out"
+  step "remove --yes removes the package"
+  expect_status "remove --yes exits 0" 0 u remove --yes pk-hello
+  check_not "pk-hello is gone" is_installed pk-hello
+  u list | tee "$out"
+  check "list prints nothing" test ! -s "$out"
+else
+  # PackageKit's alpm backend cannot install a local pacman package (and
+  # enforces SigLevel on unsigned files), so unpakt extracts it and prints the
+  # command for a system-wide install.
+  step "a pacman package is extracted, not installed through PackageKit"
+  new_root
+  expect_status "add --yes pk-hello exits 0" 0 u add --yes "$(url "pk-hello.$ext")"
+  check "the output says why PackageKit was skipped" grep -q 'PackageKit cannot install local pacman packages' "$out"
+  check "the output prints the pacman command" grep -q 'sudo pacman -U' "$out"
+  check_not "pk-hello is not installed natively" is_installed pk-hello
+  u info pk-hello | tee "$out"
+  check "info shows backend: extract" grep -q 'backend: extract' "$out"
+  expect_status "remove --yes exits 0" 0 u remove --yes pk-hello
+  u list | tee "$out"
+  check "list prints nothing" test ! -s "$out"
+fi
 
 step "a risky foreign package is refused"
 new_root

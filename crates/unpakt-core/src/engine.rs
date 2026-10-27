@@ -26,8 +26,8 @@ use crate::journal::{Expect, Intent};
 use crate::lock::{self, WriteLock};
 use crate::manifest::{AppRecord, FileKind, FileRecord, Manifest, VersionRecord};
 use crate::model::{
-    Artifact, EntryCandidate, FormatKind, Icon, Payload, PayloadIndex, Release, SourceCfg,
-    SourceKind,
+    Artifact, EntryCandidate, FormatKind, Icon, PackageFamily, Payload, PayloadIndex, Release,
+    SourceCfg, SourceKind,
 };
 use crate::naming::{slug, validate_command, version_label};
 use crate::packagekit::dbus::Dbus;
@@ -863,11 +863,20 @@ impl Engine {
             .package
             .as_ref()
             .is_some_and(|meta| Some(meta.family) == self.host.family());
+        // PackageKit's alpm backend rejects local pacman packages and enforces
+        // the repository SigLevel on unsigned files, so they are always extracted.
+        let pk_family = same_family
+            && payload
+                .package
+                .as_ref()
+                .is_some_and(|meta| meta.family != PackageFamily::Pacman);
         let native =
-            same_family && !opts.extract && !self.host.immutable_root && self.packagekit_ready();
+            pk_family && !opts.extract && !self.host.immutable_root && self.packagekit_ready();
         let native_skipped = (same_family && !native && !opts.extract).then(|| {
             if self.host.immutable_root {
                 "the system is image-based".to_string()
+            } else if !pk_family {
+                "PackageKit cannot install local pacman packages".to_string()
             } else {
                 "PackageKit is not available".to_string()
             }

@@ -492,3 +492,30 @@ fn already_installed_is_a_conflict() {
     assert!(matches!(engine.install(again), Err(Error::Conflict(_))));
     assert_eq!(installs(&pk), 1);
 }
+
+#[test]
+fn refused_consent_keeps_the_download() {
+    let forge = common::MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let deb = hello_deb(src.path(), None);
+    forge.publish(
+        "1.0",
+        vec![("hello_1.0.deb".into(), std::fs::read(&deb).unwrap())],
+    );
+    let mut engine =
+        native_engine(root.path(), &pk).with_http(Http::new(&forge.api_url(), None).unwrap());
+    let mut plan = engine
+        .inspect("https://github.com/o/r", AddOpts::default())
+        .unwrap();
+    let artifact = plan.plan.artifact.path.clone();
+    assert!(artifact.starts_with(engine.layout().cache.join("downloads")));
+    assert!(matches!(
+        engine.install(plan.clone()),
+        Err(Error::NeedsConsent(_))
+    ));
+    assert!(artifact.exists());
+    plan.native_consent = true;
+    engine.install(plan).unwrap();
+}

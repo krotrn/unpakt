@@ -23,13 +23,13 @@ pub(super) fn native_entry(payload: &Payload, entry: Option<&EntryCandidate>) ->
 
 impl Engine {
     pub(super) fn install_native(&mut self, p: InstallPlan) -> Result<AppRecord> {
-        let _download = self.download_guard(&p.plan.artifact.path);
         let consent = p
             .consent()
             .ok_or_else(|| Error::Unsupported("this package has no native install".into()))?;
         if !p.native_consent {
             return Err(Error::NeedsConsent(consent.message()));
         }
+        let _download = self.download_guard(&p.plan.artifact.path);
         let id = p.plan.id.clone();
         let _lock = self.begin()?;
         if self.manifest.get(&id)?.is_some() {
@@ -83,7 +83,9 @@ impl Engine {
             // Nothing was changed; any other failure may have been applied
             // after we stopped listening, so the journal stays for recovery.
             Err(e @ (Error::Refused(_) | Error::Interrupted)) => {
-                journal.finish()?;
+                if let Err(settle) = journal.finish() {
+                    tracing::warn!("{id}: could not remove the native journal: {settle}");
+                }
                 return Err(e);
             }
             Err(e) => return Err(e),

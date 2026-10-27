@@ -1,6 +1,9 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -9,6 +12,8 @@ use unpakt_core::Layout;
 use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine};
 use unpakt_core::host::Host;
+use unpakt_core::http::Http;
+use unpakt_core::packagekit::{PackageKit, PkEvent, PkPackage};
 use unpakt_core::progress::Progress;
 use unpakt_gui::worker::{Cmd, Event, Op, handle};
 
@@ -258,4 +263,258 @@ fn discard_installs_nothing() {
         matches!(&events[..], [Event::Apps(a)] if a.is_empty()),
         "{events:?}"
     );
+}
+
+/// A PackageKit that installs whatever `next_install` says.
+#[derive(Clone, Default)]
+struct FakePk(Arc<Mutex<FakePkState>>);
+
+#[derive(Default)]
+struct FakePkState {
+    installed: BTreeMap<String, PkPackage>,
+    next_install: Option<PkPackage>,
+}
+
+impl PackageKit for FakePk {
+    fn can_install_files(&self) -> bool {
+        true
+    }
+
+    fn resolve_installed(&self, name: &str) -> unpakt_core::Result<Option<PkPackage>> {
+        Ok(self.0.lock().unwrap().installed.get(name).cloned())
+    }
+
+    fn install_file(
+        &self,
+        _: &Path,
+        _: &Cancel,
+        _: &mut dyn FnMut(PkEvent),
+    ) -> unpakt_core::Result<()> {
+        let mut state = self.0.lock().unwrap();
+        if let Some(pkg) = state.next_install.take() {
+            state.installed.insert(pkg.name.clone(), pkg);
+        }
+        Ok(())
+    }
+
+    fn remove(&self, id: &str, _: &Cancel, _: &mut dyn FnMut(PkEvent)) -> unpakt_core::Result<()> {
+        self.0.lock().unwrap().installed.retain(|_, p| p.id != id);
+        Ok(())
+    }
+}
+
+fn gz(bytes: Vec<u8>) -> Vec<u8> {
+    let mut w = GzEncoder::new(Vec::new(), Compression::fast());
+    w.write_all(&bytes).unwrap();
+    w.finish().unwrap()
+}
+
+fn tar_of(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, data, mode) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(*mode);
+        header.set_entry_type(tar::EntryType::Regular);
+        builder.append_data(&mut header, path, *data).unwrap();
+    }
+    builder.into_inner().unwrap()
+}
+
+fn host_deb_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => "all",
+    }
+}
+
+/// A deb of package `hello` at `version`.
+fn hello_deb(version: &str) -> Vec<u8> {
+    let control = format!(
+        "Package: hello\nVersion: {version}\nArchitecture: {}\nMaintainer: t <t@example.org>\n",
+        host_deb_arch()
+    );
+    let members = [
+        ("debian-binary", b"2.0\n".to_vec()),
+        (
+            "control.tar.gz",
+            gz(tar_of(&[("control", control.as_bytes(), 0o644)])),
+        ),
+        (
+            "data.tar.gz",
+            gz(tar_of(&[("opt/hello/hello", b"#!/bin/sh\n", 0o755)])),
+        ),
+    ];
+    let mut out = b"!<arch>\n".to_vec();
+    for (name, data) in members {
+        out.extend(
+            format!(
+                "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                format!("{name}/"),
+                0,
+                0,
+                0,
+                "100644",
+                data.len()
+            )
+            .bytes(),
+        );
+        out.extend(&data);
+        if data.len() % 2 == 1 {
+            out.push(b'\n');
+        }
+    }
+    out
+}
+
+/// Serves `/repos/o/r/releases/latest` with one asset, `hello_<tag>.deb`.
+struct Forge {
+    port: u16,
+    release: Arc<Mutex<String>>,
+}
+
+impl Forge {
+    fn start(tag: &str) -> Forge {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let release = Arc::new(Mutex::new(tag.to_string()));
+        let tag = Arc::clone(&release);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let _ = serve(stream, port, &tag.lock().unwrap());
+            }
+        });
+        Forge { port, release }
+    }
+
+    fn publish(&self, tag: &str) {
+        *self.release.lock().unwrap() = tag.to_string();
+    }
+
+    fn http(&self) -> Http {
+        Http::new(&format!("http://127.0.0.1:{}", self.port), None).unwrap()
+    }
+}
+
+fn serve(mut stream: std::net::TcpStream, port: u16, tag: &str) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request = String::new();
+    reader.read_line(&mut request)?;
+    let mut parts = request.split_whitespace();
+    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
+            break;
+        }
+    }
+    let deb = hello_deb(tag);
+    let (status, body, len) = if path == "/repos/o/r/releases/latest" {
+        let body = format!(
+            r#"{{"tag_name":"{tag}","assets":[{{"name":"hello_{tag}.deb","browser_download_url":"http://127.0.0.1:{port}/dl/hello_{tag}.deb","size":{}}}]}}"#,
+            deb.len()
+        )
+        .into_bytes();
+        let len = body.len();
+        ("200 OK", body, len)
+    } else if path.starts_with("/dl/") {
+        let len = deb.len();
+        ("200 OK", deb, len)
+    } else {
+        ("404 Not Found", Vec::new(), 0)
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+    )?;
+    if method != "HEAD" {
+        stream.write_all(&body)?;
+    }
+    stream.flush()
+}
+
+/// A native `hello` 1.0 installed from the forge's release.
+fn native_hello(root: &Path, forge: &Forge) -> Engine {
+    let fake = FakePk::default();
+    fake.0.lock().unwrap().next_install = PkPackage::parse("hello;1.0;amd64;local");
+    let host = Host {
+        os_id: Some("debian".into()),
+        os_like: vec![],
+        immutable_root: false,
+        fuse2: true,
+        ..Host::detect()
+    };
+    let mut eng = Engine::new(Layout::under(root), host)
+        .unwrap()
+        .with_http(forge.http())
+        .with_packagekit(Box::new(fake.clone()));
+    let mut plan = eng
+        .inspect("https://github.com/o/r", AddOpts::default())
+        .unwrap();
+    plan.native_consent = true;
+    eng.install(plan).unwrap();
+    fake.0.lock().unwrap().next_install = PkPackage::parse("hello;2.0;amd64;local");
+    eng
+}
+
+/// Runs an update, answering every consent question with `answer`.
+fn update_answering(eng: &mut Engine, answer: bool) -> Vec<Event> {
+    let events = RefCell::new(Vec::new());
+    handle(
+        eng,
+        Cmd::Update {
+            id: "hello".into(),
+            cancel: Cancel::new(),
+            accept_risks: false,
+        },
+        &|e| {
+            if let Event::ConfirmNative { reply, .. } = &e {
+                reply.send(answer).unwrap();
+            }
+            events.borrow_mut().push(e);
+        },
+    );
+    events.into_inner()
+}
+
+#[test]
+fn native_update_asks_through_the_ui() {
+    let tmp = tempfile::tempdir().unwrap();
+    let forge = Forge::start("1.0");
+    let mut eng = native_hello(tmp.path(), &forge);
+    forge.publish("2.0");
+
+    let events = update_answering(&mut eng, true);
+    let asked = events
+        .iter()
+        .position(|e| matches!(e, Event::ConfirmNative { id, .. } if id == "hello"))
+        .unwrap_or_else(|| panic!("{events:?}"));
+    let updated = events
+        .iter()
+        .position(|e| matches!(e, Event::Updated { label: Some(_), .. }))
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert!(asked < updated, "{events:?}");
+}
+
+#[test]
+fn declined_native_update_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let forge = Forge::start("1.0");
+    let mut eng = native_hello(tmp.path(), &forge);
+    forge.publish("2.0");
+
+    let events = update_answering(&mut eng, false);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::Failed {
+                op: Op::Update,
+                error: Error::Refused(_)
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(!events.iter().any(|e| matches!(e, Event::Updated { .. })));
 }

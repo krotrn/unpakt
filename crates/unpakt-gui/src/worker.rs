@@ -3,7 +3,7 @@
 use relm4::{ComponentSender, Worker};
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
-use unpakt_core::engine::{AddOpts, Engine, InstallPlan, UpdateInfo};
+use unpakt_core::engine::{AddOpts, Engine, InstallPlan, NativeConsent, UpdateInfo, UpdateOpts};
 use unpakt_core::manifest::AppRecord;
 use unpakt_core::progress::Progress;
 
@@ -60,6 +60,13 @@ pub enum Event {
     Updated {
         id: String,
         label: Option<String>,
+    },
+    /// A native update needs the person's consent. The worker waits for
+    /// `reply`; dropping it declines.
+    ConfirmNative {
+        id: String,
+        message: String,
+        reply: std::sync::mpsc::Sender<bool>,
     },
     RolledBack {
         id: String,
@@ -124,9 +131,23 @@ pub fn handle(engine: &mut Engine, cmd: Cmd, emit: &dyn Fn(Event)) {
             accept_risks,
         } => {
             engine.set_cancel(cancel);
-            engine
-                .update_with(&id, accept_risks)
-                .map(|label| emit(Event::Updated { id, label }))
+            let mut confirm = |consent: &NativeConsent| {
+                let (reply, answer) = std::sync::mpsc::channel();
+                emit(Event::ConfirmNative {
+                    id: id.clone(),
+                    message: consent.message(),
+                    reply,
+                });
+                answer.recv().unwrap_or(false)
+            };
+            let result = engine.update_opts(
+                &id,
+                UpdateOpts {
+                    allow_risky: accept_risks,
+                    confirm_native: Some(&mut confirm),
+                },
+            );
+            result.map(|label| emit(Event::Updated { id, label }))
         }
         Cmd::Rollback { id } => {
             engine.set_cancel(Cancel::new());

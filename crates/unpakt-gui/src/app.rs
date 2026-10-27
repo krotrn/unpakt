@@ -43,6 +43,7 @@ pub enum Msg {
     UpdateAnyway,
     RemoveClicked(String),
     RemoveApp(String),
+    NativeUpdateAnswered(bool),
 }
 
 pub struct App {
@@ -347,12 +348,10 @@ impl SimpleComponent for App {
             }
             Msg::RemoveClicked(id) => {
                 if self.model.busy == Busy::Idle {
-                    let name = self
-                        .apps
-                        .iter()
-                        .find(|a| a.id == id)
-                        .map_or_else(|| id.clone(), |a| a.name.clone());
-                    apps::confirm_remove(&self.ui.window, &id, &name, &sender);
+                    let app = self.apps.iter().find(|a| a.id == id);
+                    let name = app.map_or_else(|| id.clone(), |a| a.name.clone());
+                    let native = app.is_some_and(apps::is_native);
+                    apps::confirm_remove(&self.ui.window, &id, &name, native, &sender);
                 }
             }
             Msg::RemoveApp(id) => {
@@ -361,6 +360,7 @@ impl SimpleComponent for App {
                     self.worker.emit(Cmd::Remove { id });
                 }
             }
+            Msg::NativeUpdateAnswered(yes) => self.model.answer_native(yes),
             Msg::CloseRequested => {
                 if self.model.request_close() {
                     self.discard_plan();
@@ -495,6 +495,7 @@ impl App {
                 self.show_shadowed(&title, &body, sender);
             }
             Effect::OfferUpdateAnyway { body } => self.offer_update_anyway(&body, sender),
+            Effect::AskNativeUpdate { message } => self.ask_native_update(&message, sender),
             Effect::Toast(text) => self.toast(&text),
             Effect::Close => {
                 self.discard_plan();
@@ -544,6 +545,20 @@ impl App {
         let sender = sender.clone();
         dialog.connect_response(Some("update"), move |_, _| {
             sender.input(Msg::UpdateAnyway);
+        });
+        dialog.present(Some(&self.ui.window));
+    }
+
+    fn ask_native_update(&self, message: &str, sender: &ComponentSender<Self>) {
+        let dialog = adw::AlertDialog::new(Some("Update system-wide?"), Some(message));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("update", "Update system-wide");
+        dialog.set_response_appearance("update", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let sender = sender.clone();
+        dialog.connect_response(None, move |_, response| {
+            sender.input(Msg::NativeUpdateAnswered(response == "update"));
         });
         dialog.present(Some(&self.ui.window));
     }

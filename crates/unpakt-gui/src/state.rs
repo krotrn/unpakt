@@ -202,6 +202,8 @@ pub struct Model {
     list_pending: bool,
     /// The last inspected input and its options, for retries.
     last_inspect: Option<(String, AddOpts)>,
+    /// Where the answer to the native update question goes.
+    native_reply: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 /// What the view must do after an event.
@@ -222,6 +224,10 @@ pub enum Effect {
     /// The update brings compatibility problems the user has not accepted.
     OfferUpdateAnyway {
         body: String,
+    },
+    /// A native update waits for consent; answer with `answer_native`.
+    AskNativeUpdate {
+        message: String,
     },
     Toast(String),
     Close,
@@ -331,6 +337,14 @@ impl Model {
             return Effect::None;
         }
 
+        // The worker is waiting for the answer; the operation stays running.
+        if let Event::ConfirmNative { message, reply, .. } = e {
+            self.native_reply = Some(reply.clone());
+            return Effect::AskNativeUpdate {
+                message: message.clone(),
+            };
+        }
+
         // A successful change is followed by `Event::Apps` with the fresh list.
         // Stay busy until that arrives so no new operation can start in between,
         // unless the window is closing, which needs no further events.
@@ -422,6 +436,14 @@ impl Model {
         }
     }
 
+    /// Answers the pending native update question. Only the first answer
+    /// counts; later calls send nothing.
+    pub fn answer_native(&mut self, yes: bool) {
+        if let Some(reply) = self.native_reply.take() {
+            let _ = reply.send(yes);
+        }
+    }
+
     /// Cancels the running operation, if any. The worker then reports the
     /// outcome as usual.
     pub fn cancel_op(&self) {
@@ -435,6 +457,8 @@ impl Model {
     pub fn request_close(&mut self) -> bool {
         if let Busy::Working { .. } = self.busy {
             self.close_requested = true;
+            // The worker may be waiting for an answer that will never come.
+            self.answer_native(false);
             self.cancel_op();
             false
         } else {
@@ -1286,5 +1310,43 @@ mod tests {
             error: Error::Refused("db".into()),
         });
         assert!(matches!(effect, Effect::ShowError { .. }), "{effect:?}");
+    }
+
+    #[test]
+    fn confirm_native_keeps_busy_and_answers_once() {
+        let mut m = Model::default();
+        m.start(Op::Update);
+        let (reply, rx) = std::sync::mpsc::channel();
+        let effect = m.on_event(&Event::ConfirmNative {
+            id: "a".into(),
+            message: "Installs system-wide.".into(),
+            reply,
+        });
+        assert_eq!(
+            effect,
+            Effect::AskNativeUpdate {
+                message: "Installs system-wide.".into()
+            }
+        );
+        assert!(matches!(m.busy, Busy::Working { op: Op::Update, .. }));
+        m.answer_native(true);
+        m.answer_native(false);
+        assert_eq!(rx.try_recv(), Ok(true));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn close_while_asking_declines() {
+        let mut m = Model::default();
+        m.start(Op::Update);
+        let (reply, rx) = std::sync::mpsc::channel();
+        m.on_event(&Event::ConfirmNative {
+            id: "a".into(),
+            message: "m".into(),
+            reply,
+        });
+        assert!(!m.request_close());
+        assert!(m.close_requested);
+        assert_eq!(rx.try_recv(), Ok(false));
     }
 }

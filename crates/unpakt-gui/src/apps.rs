@@ -4,6 +4,7 @@ use relm4::ComponentSender;
 use relm4::adw;
 use relm4::adw::prelude::*;
 use relm4::gtk;
+use unpakt_core::engine::NATIVE_BACKEND;
 use unpakt_core::manifest::AppRecord;
 
 use crate::app::{App, Msg};
@@ -134,6 +135,10 @@ impl Detail {
         let version = row("Version", &app.current);
         row("Format", app.format.as_str());
         row("Source", &app.source.location);
+        let native = is_native(app);
+        if native {
+            row("Installation", NATIVE_NOTE);
+        }
 
         let update = gtk::Button::with_label("Update");
         update.connect_clicked({
@@ -157,7 +162,9 @@ impl Detail {
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         actions.set_halign(gtk::Align::End);
         actions.append(&update);
-        actions.append(&rollback);
+        if !native {
+            actions.append(&rollback);
+        }
         actions.append(&remove);
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
@@ -219,17 +226,31 @@ impl Detail {
     }
 }
 
+/// Whether the system package manager owns this app.
+pub fn is_native(app: &AppRecord) -> bool {
+    app.backend == NATIVE_BACKEND
+}
+
+const NATIVE_NOTE: &str = "Installed system-wide with PackageKit";
+
+/// What the remove dialog says is removed.
+pub fn remove_body(native: bool) -> &'static str {
+    if native {
+        "It is removed from the system with your package manager."
+    } else {
+        "The application and its launcher entry are removed."
+    }
+}
+
 /// Asks for confirmation before removing `name`. Cancel is the default.
 pub fn confirm_remove(
     window: &adw::ApplicationWindow,
     id: &str,
     name: &str,
+    native: bool,
     sender: &ComponentSender<App>,
 ) {
-    let dialog = adw::AlertDialog::new(
-        Some(&format!("Remove {name}?")),
-        Some("The application and its launcher entry are removed."),
-    );
+    let dialog = adw::AlertDialog::new(Some(&format!("Remove {name}?")), Some(remove_body(native)));
     dialog.add_response("cancel", "Cancel");
     dialog.add_response("remove", "Remove");
     dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
@@ -241,4 +262,18 @@ pub fn confirm_remove(
         sender.input(Msg::RemoveApp(id.clone()))
     });
     dialog.present(Some(window));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_remove_names_the_package_manager() {
+        assert_eq!(
+            remove_body(true),
+            "It is removed from the system with your package manager."
+        );
+        assert!(remove_body(false).contains("launcher entry"));
+    }
 }

@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
+use futures_lite::StreamExt;
+use zbus::MessageStream;
 use zbus::blocking::fdo::DBusProxy;
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::Type;
@@ -40,6 +42,10 @@ const ERROR_NOT_AUTHORIZED: u32 = 46;
 
 /// How often a running transaction checks whether to cancel.
 const POLL: Duration = Duration::from_millis(200);
+
+/// How long a query (the capability probe, `Resolve`) may take before
+/// PackageKit counts as not answering.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Whether the `Roles` bitfield of PackageKit includes `role`.
 fn has_role(roles: u64, role: u32) -> bool {
@@ -84,6 +90,11 @@ fn error_for(code: u32, details: &str) -> Error {
         ERROR_TRANSACTION_CANCELLED => Error::Interrupted,
         _ => Error::PackageKit(details.to_string()),
     }
+}
+
+/// Whether a transaction that began at `started` has used up `limit`.
+fn timed_out(started: Instant, limit: Option<Duration>, now: Instant) -> bool {
+    limit.is_some_and(|limit| now.saturating_duration_since(started) >= limit)
 }
 
 /// What a transaction tells its caller.
@@ -135,6 +146,21 @@ fn signal_of(msg: &Message) -> Option<Vec<Signal>> {
     }
 }
 
+/// The next message of `stream`, `None` when none arrives within `wait`.
+/// `Some(None)` means the stream ended.
+fn next_message(
+    stream: &mut MessageStream,
+    wait: Duration,
+) -> Option<Option<zbus::Result<Message>>> {
+    async_io::block_on(futures_lite::future::or(
+        async { Some(stream.next().await) },
+        async {
+            async_io::Timer::after(wait).await;
+            None
+        },
+    ))
+}
+
 fn bus_error(e: zbus::Error) -> Error {
     Error::PackageKit(e.to_string())
 }
@@ -164,10 +190,7 @@ impl Dbus {
         Ok(conn)
     }
 
-    fn probe(&self) -> zbus::Result<bool> {
-        let conn = self
-            .connection()
-            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
+    fn probe(conn: Connection) -> zbus::Result<bool> {
         let bus = DBusProxy::new(&conn)?;
         let name = zbus::names::BusName::try_from(SERVICE)?;
         let present = bus.name_has_owner(name)?
@@ -184,11 +207,14 @@ impl Dbus {
     }
 
     /// Runs one transaction: creates it, listens, calls `method`, and follows
-    /// it to its end. Returns the ids of the packages it reported.
+    /// it to its end. Returns the ids of the packages it reported. `limit`
+    /// bounds how long the transaction may run; the signal subscription ends
+    /// when this returns, whichever way.
     fn transact<B>(
         &self,
         method: &str,
         body: &B,
+        limit: Option<Duration>,
         cancel: &Cancel,
         on: &mut dyn FnMut(PkEvent),
     ) -> Result<Vec<String>>
@@ -211,21 +237,9 @@ impl Dbus {
             .path(path.as_ref())
             .map_err(bus_error)?
             .build();
-        let messages = MessageIterator::for_match_rule(rule, &conn, None).map_err(bus_error)?;
-        let (send, recv) = mpsc::channel();
-        std::thread::spawn(move || {
-            for msg in messages.flatten() {
-                let Some(signals) = signal_of(&msg) else {
-                    continue;
-                };
-                for signal in signals {
-                    let last = matches!(signal, Signal::Finished(_));
-                    if send.send(signal).is_err() || last {
-                        return;
-                    }
-                }
-            }
-        });
+        let mut messages = MessageIterator::for_match_rule(rule, &conn, None)
+            .map_err(bus_error)?
+            .into_inner();
 
         tx.call::<_, _, ()>(method, body).map_err(bus_error)?;
 
@@ -234,29 +248,42 @@ impl Dbus {
         let mut failure = None;
         let mut packages = Vec::new();
         let mut cancel_sent = false;
+        let started = Instant::now();
+        // Installs and removals have no overall deadline: a polkit prompt may
+        // wait on the user as long as it takes, and cancelling is the way out
+        // until changes start.
         loop {
-            match recv.recv_timeout(POLL) {
-                Ok(Signal::Package(id)) => packages.push(id),
-                Ok(Signal::ErrorCode(code, details)) => {
-                    failure.get_or_insert_with(|| error_for(code, &details));
-                }
-                Ok(Signal::Finished(exit)) => {
-                    return match exit {
-                        EXIT_CANCELLED => Err(Error::Interrupted),
-                        _ => match failure {
-                            Some(e) => Err(e),
-                            None if exit == EXIT_SUCCESS => Ok(packages),
-                            None => Err(Error::PackageKit("the transaction failed".into())),
-                        },
-                    };
-                }
-                Ok(Signal::Status(s)) => status = s,
-                Ok(Signal::Percentage(p)) => percentage = p,
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
+            if timed_out(started, limit, Instant::now()) {
+                return Err(Error::PackageKit("PackageKit did not answer".into()));
+            }
+            let signals = match next_message(&mut messages, POLL) {
+                Some(Some(Ok(msg))) => signal_of(&msg).unwrap_or_default(),
+                Some(Some(Err(e))) => return Err(bus_error(e)),
+                Some(None) => {
                     return Err(Error::PackageKit(
                         "lost the connection to PackageKit".into(),
                     ));
+                }
+                None => Vec::new(),
+            };
+            for signal in signals {
+                match signal {
+                    Signal::Package(id) => packages.push(id),
+                    Signal::ErrorCode(code, details) => {
+                        failure.get_or_insert_with(|| error_for(code, &details));
+                    }
+                    Signal::Finished(exit) => {
+                        return match exit {
+                            EXIT_CANCELLED => Err(Error::Interrupted),
+                            _ => match failure {
+                                Some(e) => Err(e),
+                                None if exit == EXIT_SUCCESS => Ok(packages),
+                                None => Err(Error::PackageKit("the transaction failed".into())),
+                            },
+                        };
+                    }
+                    Signal::Status(s) => status = s,
+                    Signal::Percentage(p) => percentage = p,
                 }
             }
             let event = event_for(status, percentage);
@@ -282,16 +309,36 @@ impl Default for Dbus {
 
 impl PackageKit for Dbus {
     fn can_install_files(&self) -> bool {
-        self.probe().unwrap_or_else(|e| {
-            tracing::debug!("PackageKit is not usable: {e}");
-            false
-        })
+        let conn = match self.connection() {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::debug!("PackageKit is not usable: {e}");
+                return false;
+            }
+        };
+        // The bus calls have no timeout of their own.
+        let (send, recv) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(Dbus::probe(conn));
+        });
+        match recv.recv_timeout(QUERY_TIMEOUT) {
+            Ok(Ok(ready)) => ready,
+            Ok(Err(e)) => {
+                tracing::debug!("PackageKit is not usable: {e}");
+                false
+            }
+            Err(_) => {
+                tracing::debug!("PackageKit did not answer the capability probe");
+                false
+            }
+        }
     }
 
     fn resolve_installed(&self, name: &str) -> Result<Option<PkPackage>> {
         let ids = self.transact(
             "Resolve",
             &(1u64 << FILTER_INSTALLED, vec![name]),
+            Some(QUERY_TIMEOUT),
             &Cancel::new(),
             &mut |_| {},
         )?;
@@ -308,7 +355,7 @@ impl PackageKit for Dbus {
         on: &mut dyn FnMut(PkEvent),
     ) -> Result<()> {
         let file = file.to_string_lossy().into_owned();
-        self.transact("InstallFiles", &(0u64, vec![file]), cancel, on)
+        self.transact("InstallFiles", &(0u64, vec![file]), None, cancel, on)
             .map(|_| ())
     }
 
@@ -316,6 +363,7 @@ impl PackageKit for Dbus {
         self.transact(
             "RemovePackages",
             &(0u64, vec![package_id], false, false),
+            None,
             cancel,
             on,
         )
@@ -328,6 +376,15 @@ mod tests {
     use super::*;
 
     const RUNNING: u32 = STATUS_SETUP + 1;
+
+    #[test]
+    fn deadline_applies_only_when_set() {
+        let start = Instant::now();
+        let limit = Some(Duration::from_secs(30));
+        assert!(!timed_out(start, limit, start + Duration::from_secs(29)));
+        assert!(timed_out(start, limit, start + Duration::from_secs(30)));
+        assert!(!timed_out(start, None, start + Duration::from_secs(86_400)));
+    }
 
     #[test]
     fn roles_bitfield() {

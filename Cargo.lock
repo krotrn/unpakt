@@ -3019,10 +3019,12 @@ name = "unpakt-core"
 version = "0.2.0"
 dependencies = [
  "ar",
+ "async-io",
  "backhand",
  "bzip2",
  "dirs",
  "flate2",
+ "futures-lite",
  "goblin",
  "hex",
  "liblzma",

@@ -13,10 +13,12 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-io = "2.6.0"
 backhand = "0.25.5"
 bzip2 = "0.6.1"
 dirs = "7.0.0"
 flate2 = "1.1.10"
+futures-lite = "2.6.1"
 goblin = "0.10.7"
 hex = "0.4.3"
 liblzma = { version = "0.4.8", features = ["parallel"] }

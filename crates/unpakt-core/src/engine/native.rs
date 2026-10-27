@@ -21,6 +21,21 @@ pub(super) fn native_entry(payload: &Payload, entry: Option<&EntryCandidate>) ->
     }
 }
 
+/// Whether the program of a system-wide app is still where it was installed.
+pub(super) fn native_check(entry: &Path) -> (bool, String) {
+    if entry.exists() {
+        (true, "installed system-wide by the package manager".into())
+    } else {
+        (
+            false,
+            format!(
+                "{} is missing; the package may have been removed outside unpakt",
+                entry.display()
+            ),
+        )
+    }
+}
+
 impl Engine {
     pub(super) fn install_native(&mut self, p: InstallPlan) -> Result<AppRecord> {
         let consent = p
@@ -112,5 +127,75 @@ impl Engine {
             .commit_install_with(&app, &version, &[], &stored, &[])?;
         journal.finish()?;
         Ok(app)
+    }
+
+    pub(super) fn remove_native(&mut self, app: &AppRecord) -> Result<()> {
+        let id = &app.id;
+        if !self.packagekit_ready() {
+            return Err(Error::PackageKitUnavailable(format!(
+                "{id} was installed with PackageKit, which is not available now; run `unpakt remove --forget {id}` to drop the record and leave the package installed"
+            )));
+        }
+        let pk_name = self
+            .manifest
+            .option(id, "pk.name")?
+            .unwrap_or_else(|| app.name.clone());
+        let journal = NativeJournal::create(
+            &self.layout.data.join("native"),
+            &NativeIntent {
+                op: NativeOp::Remove,
+                app: id.clone(),
+                pk_name: pk_name.clone(),
+                version: String::new(),
+                record: None,
+            },
+        )?;
+
+        // A refused or failed removal leaves a stale record, which is safe;
+        // dropping the journal avoids a later run untracking a package that
+        // is still installed.
+        let installed = self.packagekit.resolve_installed(&pk_name);
+        if let Some(package) = installed.as_ref().ok().and_then(Option::as_ref) {
+            self.emit(Progress::Installing);
+            let result = self
+                .packagekit
+                .remove(&package.id, &self.cancel, &mut |event| {
+                    self.emit(match event {
+                        PkEvent::WaitingForAuth => Progress::WaitingForAuthorization,
+                        PkEvent::Changing { percent } => Progress::SystemChange { percent },
+                    })
+                });
+            if let Err(e) = result {
+                if let Err(settle) = journal.finish() {
+                    tracing::warn!("{id}: could not remove the native journal: {settle}");
+                }
+                return Err(e);
+            }
+        }
+        if let Err(e) = installed {
+            if let Err(settle) = journal.finish() {
+                tracing::warn!("{id}: could not remove the native journal: {settle}");
+            }
+            return Err(e);
+        }
+        self.manifest.remove(id)?;
+        journal.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_check_cases() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert_eq!(
+            native_check(file.path()),
+            (true, "installed system-wide by the package manager".into())
+        );
+        let (ok, detail) = native_check(Path::new("/nonexistent/unpakt/bin"));
+        assert!(!ok);
+        assert!(detail.contains("removed outside unpakt"));
     }
 }

@@ -571,3 +571,138 @@ fn pending_native_journal_does_not_block_other_installs() {
         check.detail
     );
 }
+
+fn engine_with_hello(root: &Path, pk: &FakePk) -> Engine {
+    let src = tempfile::tempdir().unwrap();
+    let deb = hello_deb(src.path(), None);
+    let mut engine = native_engine(root, pk);
+    let plan = native_plan(&engine, &deb, true);
+    engine.install(plan).unwrap();
+    engine
+}
+
+fn removes(pk: &FakePk) -> Vec<String> {
+    let state = pk.0.lock().unwrap();
+    state
+        .calls
+        .iter()
+        .filter(|c| c.starts_with("remove "))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn remove_native_calls_packagekit() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = engine_with_hello(root.path(), &pk);
+    engine.remove("hello").unwrap();
+    assert_eq!(removes(&pk), ["remove hello;1.0;amd64;local"]);
+    assert!(matches!(engine.get("hello"), Err(Error::NotFound(_))));
+    assert!(pk.0.lock().unwrap().installed.is_empty());
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn remove_native_already_gone_forgets_it() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = engine_with_hello(root.path(), &pk);
+    pk.0.lock().unwrap().installed.clear();
+    engine.remove("hello").unwrap();
+    assert!(removes(&pk).is_empty());
+    assert!(engine.list().unwrap().is_empty());
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn remove_native_failure_keeps_record() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = engine_with_hello(root.path(), &pk);
+    pk.0.lock().unwrap().fail_remove =
+        Some(|| Error::PackageKit("hello is needed by world".into()));
+    match engine.remove("hello") {
+        Err(Error::PackageKit(m)) => assert!(m.contains("needed by"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(engine.get("hello").is_ok());
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn remove_native_without_packagekit_points_to_forget() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let engine = engine_with_hello(root.path(), &pk);
+    let mut engine = engine.with_packagekit(Box::new(unpakt_core::packagekit::Unavailable));
+    match engine.remove("hello") {
+        Err(Error::PackageKitUnavailable(m)) => {
+            assert!(m.contains("unpakt remove --forget hello"), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(engine.get("hello").is_ok());
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn forget_drops_only_the_record() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = engine_with_hello(root.path(), &pk);
+    engine.forget("hello").unwrap();
+    assert!(matches!(engine.get("hello"), Err(Error::NotFound(_))));
+    assert!(removes(&pk).is_empty());
+    assert!(pk.0.lock().unwrap().installed.contains_key("hello"));
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn forget_refuses_extract_apps() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let tarball = common::build_tarball(
+        src.path(),
+        "tool-1.0.tar.gz",
+        common::Comp::Gz,
+        &[common::E::File("tool/tool", b"#!/bin/sh\n", 0o755)],
+    );
+    let mut engine = native_engine(root.path(), &fake());
+    let plan = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    engine.install(plan).unwrap();
+    match engine.forget("tool") {
+        Err(Error::Unsupported(m)) => assert!(m.contains("use `unpakt remove"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(engine.list().unwrap().len(), 1);
+    assert!(matches!(engine.forget("nope"), Err(Error::NotFound(_))));
+}
+
+#[test]
+fn rollback_native_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = engine_with_hello(root.path(), &pk);
+    match engine.rollback("hello") {
+        Err(Error::Unsupported(m)) => assert!(m.contains("can't be rolled back"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn doctor_reports_missing_native_entry() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let engine = engine_with_hello(root.path(), &pk);
+    let checks = engine.doctor();
+    let check = checks.iter().find(|c| c.name == "app:hello").unwrap();
+    assert!(!check.ok);
+    assert!(
+        check.detail.contains("removed outside unpakt"),
+        "{}",
+        check.detail
+    );
+}

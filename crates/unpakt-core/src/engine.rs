@@ -1281,6 +1281,11 @@ impl Engine {
     pub fn rollback(&mut self, id: &str) -> Result<String> {
         let _lock = self.begin()?;
         let (app, versions, files) = self.get(id)?;
+        if app.backend == NATIVE_BACKEND {
+            return Err(Error::Unsupported(format!(
+                "{id} was installed system-wide with PackageKit; native installs can't be rolled back"
+            )));
+        }
         let pos = versions
             .iter()
             .position(|v| v.label == app.current)
@@ -1371,7 +1376,10 @@ impl Engine {
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
         let _lock = self.begin()?;
-        let (_, _, files) = self.get(id)?;
+        let (app, _, files) = self.get(id)?;
+        if app.backend == NATIVE_BACKEND {
+            return self.remove_native(&app);
+        }
         self.emit(Progress::Installing);
         let mut txn = self.journaled(id, Expect::Absent)?;
         disintegrate(&files, &mut txn)?;
@@ -1384,6 +1392,18 @@ impl Engine {
         txn.commit();
         self.refresh_desktop_database();
         Ok(())
+    }
+
+    /// Drops the record of a system-wide app and leaves its package installed.
+    pub fn forget(&mut self, id: &str) -> Result<()> {
+        let _lock = self.begin()?;
+        let (app, _, _) = self.get(id)?;
+        if app.backend != NATIVE_BACKEND {
+            return Err(Error::Unsupported(format!(
+                "{id} has files in your user directory; use `unpakt remove {id}`"
+            )));
+        }
+        self.manifest.remove(id)
     }
 
     pub fn doctor(&self) -> Vec<Check> {
@@ -1483,6 +1503,16 @@ impl Engine {
 
     fn check_app(&self, app: &AppRecord) -> Check {
         let name = format!("app:{}", app.id);
+        if app.backend == NATIVE_BACKEND {
+            let (ok, detail) = match self.manifest.versions(&app.id) {
+                Ok(versions) => match versions.iter().find(|v| v.label == app.current) {
+                    Some(v) => native::native_check(&v.entry),
+                    None => (false, format!("{} has no recorded version", app.id)),
+                },
+                Err(e) => (false, e.to_string()),
+            };
+            return Check { name, ok, detail };
+        }
         let current = self.layout.apps.join(&app.id).join("current");
         if std::fs::metadata(&current).is_err() {
             return Check {

@@ -464,7 +464,7 @@ fn exit_code(err: &anyhow::Error) -> u8 {
         || err.is::<UpdatesRefused>()
         || matches!(
             err.downcast_ref::<Error>(),
-            Some(Error::Refused(_) | Error::NeedsAcceptance(_))
+            Some(Error::Refused(_) | Error::NeedsAcceptance(_) | Error::NeedsConsent(_))
         );
     if refused { EXIT_REFUSED } else { EXIT_ERROR }
 }
@@ -489,6 +489,9 @@ fn main() -> ExitCode {
                 eprintln!("error: {}", clean_lines(&format!("{err:#}")));
                 if matches!(err.downcast_ref::<Error>(), Some(Error::NeedsAcceptance(_))) {
                     eprintln!("pass --allow-risky to accept them");
+                }
+                if matches!(err.downcast_ref::<Error>(), Some(Error::NeedsConsent(_))) {
+                    eprintln!("pass --yes to confirm");
                 }
             }
             ExitCode::from(exit_code(&err))
@@ -516,6 +519,12 @@ mod tests {
         let refused = update_failure(2, true).unwrap();
         assert_eq!(exit_code(&refused), EXIT_REFUSED);
         assert_eq!(refused.to_string(), "2 update(s) failed");
+    }
+
+    #[test]
+    fn needs_consent_exits_with_the_refusal_code() {
+        let err: anyhow::Error = Error::NeedsConsent("x".into()).into();
+        assert_eq!(exit_code(&err), EXIT_REFUSED);
     }
 
     #[test]

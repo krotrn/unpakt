@@ -32,6 +32,15 @@ pub enum Error {
     /// again with acceptance.
     #[error("refused: {0}")]
     NeedsAcceptance(String),
+    /// A native install or update that needs the user's confirmation first.
+    #[error("refused: {0}")]
+    NeedsConsent(String),
+    /// The system package manager failed or rejected the request.
+    #[error("package manager error: {0}")]
+    PackageKit(String),
+    /// PackageKit cannot be reached.
+    #[error("{0}")]
+    PackageKitUnavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

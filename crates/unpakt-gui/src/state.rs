@@ -279,6 +279,11 @@ impl Model {
                     }
                     Progress::Inspecting => "Inspecting…".into(),
                     Progress::Installing => "Installing…".into(),
+                    Progress::WaitingForAuthorization => "Waiting for authorization…".into(),
+                    Progress::SystemChange { percent } => {
+                        *share = percent.map(|p| f64::from(p.min(100)) / 100.0);
+                        "Installing with the system package manager…".into()
+                    }
                 };
             }
             return Effect::None;

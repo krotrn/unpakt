@@ -13,6 +13,7 @@ pub mod lock;
 pub mod manifest;
 pub mod model;
 pub mod naming;
+pub mod packagekit;
 pub mod paths;
 pub mod progress;
 pub mod recover;

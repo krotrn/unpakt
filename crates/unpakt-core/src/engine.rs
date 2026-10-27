@@ -1,7 +1,7 @@
 //! Ties inspection, backends, integration, the manifest and the undo journal
 //! together. Installs and removals are all-or-nothing.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -30,6 +30,8 @@ use crate::model::{
     SourceKind,
 };
 use crate::naming::{slug, validate_command, version_label};
+use crate::packagekit::dbus::Dbus;
+use crate::packagekit::{PackageKit, Unavailable};
 use crate::progress::{Progress, ProgressFn};
 use crate::recover::{Recovered, journals, recover};
 use crate::select::choose;
@@ -177,6 +179,16 @@ pub struct Engine {
     cancel: Cancel,
     progress: ProgressFn,
     host_libs: std::cell::OnceCell<crate::compat::HostLibs>,
+    #[expect(dead_code, reason = "read by the native install route")]
+    packagekit: Box<dyn PackageKit>,
+    #[expect(dead_code, reason = "read by the native install route")]
+    pk_ready: std::cell::OnceCell<bool>,
+}
+
+/// Whether the real PackageKit client is used; only `UNPAKT_PACKAGEKIT=0`
+/// turns it off.
+pub fn packagekit_enabled(var: Option<&OsStr>) -> bool {
+    var != Some(OsStr::new("0"))
 }
 
 fn now() -> i64 {
@@ -360,7 +372,26 @@ impl Engine {
             cancel: Cancel::new(),
             progress: Arc::new(|_| {}),
             host_libs: std::cell::OnceCell::new(),
+            packagekit: Box::new(Unavailable),
+            pk_ready: std::cell::OnceCell::new(),
         })
+    }
+
+    /// Uses `pk` as the system package manager.
+    pub fn with_packagekit(self, pk: Box<dyn PackageKit>) -> Engine {
+        Engine {
+            packagekit: pk,
+            pk_ready: std::cell::OnceCell::new(),
+            ..self
+        }
+    }
+
+    /// Whether PackageKit can install local files; asked once.
+    #[expect(dead_code, reason = "called by the native install route")]
+    pub(crate) fn packagekit_ready(&self) -> bool {
+        *self
+            .pk_ready
+            .get_or_init(|| self.packagekit.can_install_files())
     }
 
     /// Uses `libs` instead of probing the running system.
@@ -466,7 +497,12 @@ impl Engine {
     }
 
     pub fn open_default() -> Result<Engine> {
-        Engine::new(Layout::user()?, Host::detect())
+        let engine = Engine::new(Layout::user()?, Host::detect())?;
+        if packagekit_enabled(std::env::var_os("UNPAKT_PACKAGEKIT").as_deref()) {
+            Ok(engine.with_packagekit(Box::new(Dbus::new())))
+        } else {
+            Ok(engine)
+        }
     }
 
     pub fn layout(&self) -> &Layout {
@@ -1369,6 +1405,14 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packagekit_switch() {
+        use std::ffi::OsStr;
+        assert!(packagekit_enabled(None));
+        assert!(packagekit_enabled(Some(OsStr::new("1"))));
+        assert!(!packagekit_enabled(Some(OsStr::new("0"))));
+    }
 
     fn big_file(dir: &Path) -> PathBuf {
         let path = dir.join("big.bin");

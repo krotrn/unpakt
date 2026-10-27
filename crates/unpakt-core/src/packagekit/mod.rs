@@ -1,5 +1,7 @@
 //! The system package manager, reached through PackageKit.
 
+pub mod dbus;
+
 use std::path::Path;
 
 use crate::cancel::Cancel;

@@ -3,9 +3,11 @@ mod common;
 use std::path::Path;
 
 use common::fake_pk::FakePk;
-use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
+use unpakt_core::engine::{AddOpts, Engine};
+use unpakt_core::host::Host;
 use unpakt_core::packagekit::{PackageKit, PkEvent, PkPackage};
+use unpakt_core::{Error, Layout};
 
 fn fake() -> FakePk {
     let pk = FakePk::default();
@@ -45,4 +47,26 @@ fn fake_ignores_cancel_once_changes_start() {
     })
     .unwrap();
     assert!(pk.0.lock().unwrap().installed.contains_key("foo"));
+}
+
+fn deb_host() -> Host {
+    Host {
+        os_id: Some("debian".into()),
+        os_like: vec![],
+        immutable_root: false,
+        fuse2: true,
+        ..Host::detect()
+    }
+}
+
+#[test]
+fn default_engine_has_no_packagekit() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (_, deb) = common::deb_with_elf(src.path(), "1.0.0", &[], &[], false);
+    let engine = Engine::new(Layout::under(root.path()), deb_host()).unwrap();
+    let plan = engine
+        .inspect(deb.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    assert_eq!(plan.backend, "extract");
 }

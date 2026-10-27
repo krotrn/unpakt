@@ -96,6 +96,7 @@ fn run(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_unpakt"))
         .env_clear()
         .env("UNPAKT_ROOT", root)
+        .env("UNPAKT_PACKAGEKIT", "0")
         .env("HOME", root)
         .env(
             "PATH",
@@ -281,6 +282,7 @@ fn spawn_at_prompt(root: &Path, input: &Path) -> (std::process::Child, std::fs::
     let child = Command::new(env!("CARGO_BIN_EXE_unpakt"))
         .env_clear()
         .env("UNPAKT_ROOT", root)
+        .env("UNPAKT_PACKAGEKIT", "0")
         .env("HOME", root)
         .env(
             "PATH",
@@ -441,6 +443,7 @@ fn remove_reports_waiting_for_lock() {
     let child = Command::new(env!("CARGO_BIN_EXE_unpakt"))
         .env_clear()
         .env("UNPAKT_ROOT", tmp.path())
+        .env("UNPAKT_PACKAGEKIT", "0")
         .env("HOME", tmp.path())
         .env("PATH", "/usr/bin:/bin")
         .args(["remove", id, "--yes"])
@@ -542,6 +545,7 @@ fn run_exe(exe: &Path, root: &Path, repo: Option<&str>, args: &[&str]) -> Output
     let mut cmd = Command::new(exe);
     cmd.env_clear()
         .env("UNPAKT_ROOT", root)
+        .env("UNPAKT_PACKAGEKIT", "0")
         .env("HOME", root)
         .env(
             "PATH",

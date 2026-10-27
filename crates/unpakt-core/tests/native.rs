@@ -706,3 +706,34 @@ fn doctor_reports_missing_native_entry() {
         check.detail
     );
 }
+
+#[test]
+fn remove_native_without_recorded_name_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = engine_with_hello(root.path(), &pk);
+    let db = rusqlite::Connection::open(&engine.layout().db).unwrap();
+    db.execute("DELETE FROM options WHERE key = 'pk.name'", [])
+        .unwrap();
+    drop(db);
+    pk.0.lock().unwrap().calls.clear();
+    match engine.remove("hello") {
+        Err(Error::PackageKit(m)) => assert!(m.contains("no recorded package name"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(engine.get("hello").is_ok());
+    assert_eq!(journals(engine.layout()), 0);
+    assert!(pk.0.lock().unwrap().calls.is_empty());
+}
+
+#[test]
+fn remove_native_resolve_failure_keeps_record() {
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = engine_with_hello(root.path(), &pk);
+    pk.0.lock().unwrap().fail_resolve_once = true;
+    assert!(matches!(engine.remove("hello"), Err(Error::PackageKit(_))));
+    assert!(engine.get("hello").is_ok());
+    assert_eq!(journals(engine.layout()), 0);
+    assert!(removes(&pk).is_empty());
+}

@@ -136,10 +136,11 @@ impl Engine {
                 "{id} was installed with PackageKit, which is not available now; run `unpakt remove --forget {id}` to drop the record and leave the package installed"
             )));
         }
-        let pk_name = self
-            .manifest
-            .option(id, "pk.name")?
-            .unwrap_or_else(|| app.name.clone());
+        let Some(pk_name) = self.manifest.option(id, "pk.name")? else {
+            return Err(Error::PackageKit(format!(
+                "{id} has no recorded package name; run `unpakt remove --forget {id}`"
+            )));
+        };
         let journal = NativeJournal::create(
             &self.layout.data.join("native"),
             &NativeIntent {
@@ -154,29 +155,31 @@ impl Engine {
         // A refused or failed removal leaves a stale record, which is safe;
         // dropping the journal avoids a later run untracking a package that
         // is still installed.
-        let installed = self.packagekit.resolve_installed(&pk_name);
-        if let Some(package) = installed.as_ref().ok().and_then(Option::as_ref) {
-            self.emit(Progress::Installing);
-            let result = self
-                .packagekit
-                .remove(&package.id, &self.cancel, &mut |event| {
-                    self.emit(match event {
-                        PkEvent::WaitingForAuth => Progress::WaitingForAuthorization,
-                        PkEvent::Changing { percent } => Progress::SystemChange { percent },
-                    })
-                });
-            if let Err(e) = result {
+        match self.packagekit.resolve_installed(&pk_name) {
+            Err(e) => {
                 if let Err(settle) = journal.finish() {
                     tracing::warn!("{id}: could not remove the native journal: {settle}");
                 }
                 return Err(e);
             }
-        }
-        if let Err(e) = installed {
-            if let Err(settle) = journal.finish() {
-                tracing::warn!("{id}: could not remove the native journal: {settle}");
+            Ok(Some(package)) => {
+                self.emit(Progress::Installing);
+                let result = self
+                    .packagekit
+                    .remove(&package.id, &self.cancel, &mut |event| {
+                        self.emit(match event {
+                            PkEvent::WaitingForAuth => Progress::WaitingForAuthorization,
+                            PkEvent::Changing { percent } => Progress::SystemChange { percent },
+                        })
+                    });
+                if let Err(e) = result {
+                    if let Err(settle) = journal.finish() {
+                        tracing::warn!("{id}: could not remove the native journal: {settle}");
+                    }
+                    return Err(e);
+                }
             }
-            return Err(e);
+            Ok(None) => {}
         }
         self.manifest.remove(id)?;
         journal.finish()

@@ -13,7 +13,9 @@ use unpakt_core::manifest::AppRecord;
 
 use crate::apps::{self, BusyArea, Detail};
 use crate::review;
-use crate::state::{Busy, Effect, Model, app_rows, compat_findings, normalize_input};
+use crate::state::{
+    Busy, Effect, Model, ReviewAction, app_rows, compat_findings, normalize_input, review_action,
+};
 use crate::worker::{Cmd, EngineWorker, Event, Op};
 
 #[derive(Debug)]
@@ -24,6 +26,9 @@ pub enum Msg {
     Confirm,
     ConfirmRisky,
     RiskyAccepted,
+    ConfirmNative,
+    NativeAccepted,
+    InstallForMeOnly,
     CancelReview,
     CancelOp,
     InspectAgain,
@@ -285,6 +290,40 @@ impl SimpleComponent for App {
                     plan.opts.allow_risky = true;
                 }
                 sender.input(Msg::Confirm);
+            }
+            Msg::ConfirmNative => {
+                if self.model.busy != Busy::Idle {
+                    return;
+                }
+                if let Some(plan) = &self.plan
+                    && let ReviewAction::InstallSystemWide { consent, .. } = review_action(plan)
+                {
+                    let dialog =
+                        adw::AlertDialog::new(Some("Install system-wide?"), Some(&consent));
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("install", "Install system-wide");
+                    dialog.set_response_appearance("install", adw::ResponseAppearance::Destructive);
+                    dialog.set_default_response(Some("cancel"));
+                    dialog.set_close_response("cancel");
+                    let sender = sender.clone();
+                    dialog.connect_response(Some("install"), move |_, _| {
+                        sender.input(Msg::NativeAccepted);
+                    });
+                    dialog.present(Some(&self.ui.window));
+                }
+            }
+            Msg::NativeAccepted => {
+                if let Some(plan) = self.plan.as_mut() {
+                    plan.native_consent = true;
+                }
+                sender.input(Msg::Confirm);
+            }
+            Msg::InstallForMeOnly => {
+                if let Some(cmd) = self.model.inspect_for_me_only() {
+                    self.discard_plan();
+                    self.ui.nav.pop();
+                    self.worker.emit(cmd);
+                }
             }
             Msg::CancelReview => {
                 self.discard_plan();

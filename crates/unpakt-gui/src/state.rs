@@ -4,7 +4,7 @@ use percent_encoding::percent_decode_str;
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
 use unpakt_core::compat::Verdict;
-use unpakt_core::engine::{AddOpts, InstallPlan, UpdateInfo};
+use unpakt_core::engine::{AddOpts, InstallPlan, Route, UpdateInfo};
 use unpakt_core::manifest::AppRecord;
 use unpakt_core::progress::Progress;
 
@@ -76,6 +76,17 @@ pub fn review_rows(p: &InstallPlan) -> Vec<(&'static str, String)> {
     if let Some(verdict) = &p.compat {
         rows.push(("Compatibility", verdict.label().into()));
     }
+    match p.route() {
+        Some(Route::Native) => rows.push(("Install", "system-wide with PackageKit".into())),
+        Some(Route::Extract) => rows.push((
+            "Install",
+            match &p.native_skipped {
+                Some(why) => format!("for you only ({why})"),
+                None => "for you only".into(),
+            },
+        )),
+        Some(Route::Refused) | None => {}
+    }
     rows
 }
 
@@ -97,10 +108,22 @@ pub fn compat_findings(p: &InstallPlan) -> Vec<(bool, String)> {
 pub enum ReviewAction {
     Install,
     InstallAnyway,
+    /// A native install: ask for `consent` first. `for_me_only` says whether
+    /// extracting into the user directory is an alternative.
+    InstallSystemWide {
+        consent: String,
+        for_me_only: bool,
+    },
     Blocked(String),
 }
 
 pub fn review_action(p: &InstallPlan) -> ReviewAction {
+    if let Some(consent) = p.consent() {
+        return ReviewAction::InstallSystemWide {
+            for_me_only: !matches!(consent.verdict, Some(Verdict::NeedsContainer(_))),
+            consent: consent.message(),
+        };
+    }
     match &p.compat {
         Some(Verdict::Risky(_)) => ReviewAction::InstallAnyway,
         Some(Verdict::NeedsContainer(_)) => ReviewAction::Blocked(
@@ -151,6 +174,8 @@ pub enum Busy {
         label: String,
         fraction: Option<f64>,
         waiting: bool,
+        /// The system package manager is changing the system; it cannot be stopped.
+        system: bool,
     },
 }
 
@@ -158,7 +183,10 @@ impl Busy {
     /// Whether Cancel can stop what is running. Rolling back and removing run
     /// with a token nothing can cancel.
     pub fn cancellable(&self) -> bool {
-        matches!(self, Busy::Working { op, .. } if !matches!(op, Op::Rollback | Op::Remove))
+        matches!(
+            self,
+            Busy::Working { op, system: false, .. } if !matches!(op, Op::Rollback | Op::Remove)
+        )
     }
 }
 
@@ -208,6 +236,7 @@ impl Model {
             label: starting_label(op).into(),
             fraction: None,
             waiting: false,
+            system: false,
         };
         self.cancel = Some(cancel.clone());
         self.list_pending = false;
@@ -231,6 +260,17 @@ impl Model {
         let (input, opts) = self.last_inspect.clone()?;
         let opts = AddOpts {
             no_bin: true,
+            ..opts
+        };
+        self.idle().then(|| self.inspect_with(input, opts))
+    }
+
+    /// Inspects the last input again, extracting into the user directory
+    /// instead of installing system-wide.
+    pub fn inspect_for_me_only(&mut self) -> Option<Cmd> {
+        let (input, opts) = self.last_inspect.clone()?;
+        let opts = AddOpts {
+            extract: true,
             ..opts
         };
         self.idle().then(|| self.inspect_with(input, opts))
@@ -263,11 +303,13 @@ impl Model {
                 label,
                 fraction: share,
                 waiting,
+                system,
                 ..
             } = &mut self.busy
             {
                 *waiting = matches!(progress, Progress::WaitingForLock);
                 *share = None;
+                *system |= matches!(progress, Progress::SystemChange { .. });
                 *label = match progress {
                     Progress::WaitingForLock => {
                         "Waiting for another unpakt operation to finish…".into()
@@ -451,15 +493,17 @@ fn failure_title(op: Op) -> &'static str {
 mod tests {
     use super::*;
     use std::fs::File;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use unpakt_core::Layout;
-    use unpakt_core::engine::Engine;
+    use unpakt_core::engine::{Engine, Route};
     use unpakt_core::host::Host;
     use unpakt_core::manifest::AppRecord;
     use unpakt_core::model::{FormatKind, SourceCfg, SourceKind};
+    use unpakt_core::packagekit::{PackageKit, PkEvent, PkPackage};
 
     #[test]
     fn normalize_input_cases() {
@@ -630,6 +674,194 @@ mod tests {
         }
     }
 
+    /// A PackageKit that can install files; nothing is ever run through it.
+    struct Ready;
+
+    impl PackageKit for Ready {
+        fn can_install_files(&self) -> bool {
+            true
+        }
+        fn resolve_installed(&self, _: &str) -> unpakt_core::Result<Option<PkPackage>> {
+            Ok(None)
+        }
+        fn install_file(
+            &self,
+            _: &Path,
+            _: &Cancel,
+            _: &mut dyn FnMut(PkEvent),
+        ) -> unpakt_core::Result<()> {
+            Ok(())
+        }
+        fn remove(
+            &self,
+            _: &str,
+            _: &Cancel,
+            _: &mut dyn FnMut(PkEvent),
+        ) -> unpakt_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fixture_deb(dir: &Path) -> PathBuf {
+        fn tar_gz(name: &str, body: &[u8], mode: u32) -> Vec<u8> {
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(mode);
+            header.set_size(body.len() as u64);
+            builder.append_data(&mut header, name, body).unwrap();
+            let mut gz = GzEncoder::new(Vec::new(), Compression::fast());
+            gz.write_all(&builder.into_inner().unwrap()).unwrap();
+            gz.finish().unwrap()
+        }
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            _ => "all",
+        };
+        let control = format!(
+            "Package: foo\nVersion: 1.2.3\nArchitecture: {arch}\nMaintainer: t <t@example.org>\n"
+        );
+        let members = [
+            ("debian-binary", b"2.0\n".to_vec()),
+            (
+                "control.tar.gz",
+                tar_gz("./control", control.as_bytes(), 0o644),
+            ),
+            (
+                "data.tar.gz",
+                tar_gz("./usr/bin/foo", b"#!/bin/sh\necho hi\n", 0o755),
+            ),
+        ];
+        let path = dir.join("foo_1.2.3_pkg.deb");
+        let mut out = File::create(&path).unwrap();
+        out.write_all(b"!<arch>\n").unwrap();
+        for (name, data) in members {
+            writeln!(
+                out,
+                "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`",
+                name,
+                0,
+                0,
+                0,
+                "100644",
+                data.len()
+            )
+            .unwrap();
+            out.write_all(&data).unwrap();
+            if data.len() % 2 == 1 {
+                out.write_all(b"\n").unwrap();
+            }
+        }
+        path
+    }
+
+    fn debian() -> Host {
+        Host {
+            os_id: Some("debian".into()),
+            os_like: vec![],
+            immutable_root: false,
+            fuse2: true,
+            ..Host::detect()
+        }
+    }
+
+    fn deb_plan(tmp: &Path, native: bool, opts: AddOpts) -> InstallPlan {
+        let deb = fixture_deb(tmp);
+        let engine = Engine::new(Layout::under(tmp), debian()).unwrap();
+        let engine = if native {
+            engine.with_packagekit(Box::new(Ready))
+        } else {
+            engine
+        };
+        engine.inspect(deb.to_str().unwrap(), opts).unwrap()
+    }
+
+    #[test]
+    fn review_action_native_offers_consent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut plan = deb_plan(tmp.path(), true, AddOpts::default());
+        assert_eq!(plan.route(), Some(Route::Native));
+        match review_action(&plan) {
+            ReviewAction::InstallSystemWide {
+                consent,
+                for_me_only,
+            } => {
+                assert!(consent.contains("will run as root"), "{consent}");
+                assert!(for_me_only);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        plan.compat = Some(Verdict::NeedsContainer(vec![finding("too new", false)]));
+        match review_action(&plan) {
+            ReviewAction::InstallSystemWide { for_me_only, .. } => assert!(!for_me_only),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_rows_show_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = deb_plan(tmp.path(), true, AddOpts::default());
+        assert!(review_rows(&plan).contains(&("Install", "system-wide with PackageKit".into())));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = deb_plan(tmp.path(), false, AddOpts::default());
+        assert!(review_rows(&plan).contains(&(
+            "Install",
+            "for you only (PackageKit is not available)".into()
+        )));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = AddOpts {
+            extract: true,
+            ..AddOpts::default()
+        };
+        let plan = deb_plan(tmp.path(), true, opts);
+        assert!(review_rows(&plan).contains(&("Install", "for you only".into())));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tarball = tarball_plan(tmp.path());
+        assert!(review_rows(&tarball).iter().all(|(n, _)| *n != "Install"));
+    }
+
+    #[test]
+    fn inspect_for_me_only_sets_extract() {
+        let mut m = Model::default();
+        assert!(m.inspect_for_me_only().is_none());
+        m.inspect("x.deb".into());
+        assert!(m.inspect_for_me_only().is_none());
+        m.on_event(&Event::Failed {
+            op: Op::Inspect,
+            error: Error::Conflict("c".into()),
+        });
+        let Some(Cmd::Inspect { input, opts, .. }) = m.inspect_for_me_only() else {
+            panic!("expected an inspect command");
+        };
+        assert_eq!(input, "x.deb");
+        assert!(opts.extract);
+    }
+
+    #[test]
+    fn system_change_cannot_be_cancelled() {
+        let mut m = Model::default();
+        m.start(Op::Install);
+        m.on_event(&Event::Progress(Progress::WaitingForAuthorization));
+        assert!(matches!(
+            &m.busy,
+            Busy::Working { label, .. } if label == "Waiting for authorization…"
+        ));
+        assert!(m.busy.cancellable());
+        m.on_event(&Event::Progress(Progress::SystemChange {
+            percent: Some(30),
+        }));
+        assert!(!m.busy.cancellable());
+        assert!(matches!(
+            &m.busy,
+            Busy::Working { fraction: Some(f), .. } if (*f - 0.3).abs() < 1e-9
+        ));
+    }
+
     #[test]
     fn compat_findings_mark_notes_non_blocking() {
         let tmp = tempfile::tempdir().unwrap();
@@ -687,6 +919,7 @@ mod tests {
                 waiting: true,
                 label: "Waiting for another unpakt operation to finish…".into(),
                 fraction: None,
+                system: false,
             }
         );
     }
@@ -707,6 +940,7 @@ mod tests {
                 waiting: false,
                 label: "Downloading tool.tar.gz…".into(),
                 fraction: Some(0.25),
+                system: false,
             }
         );
     }

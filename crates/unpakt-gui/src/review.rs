@@ -84,22 +84,29 @@ pub fn page(plan: &InstallPlan, sender: &ComponentSender<App>) -> adw::Navigatio
         move |_| sender.input(Msg::CancelReview)
     });
     let install = match &action {
-        ReviewAction::Install => Some(("Install", "suggested-action", false)),
-        ReviewAction::InstallAnyway => Some(("Install anyway", "destructive-action", true)),
+        ReviewAction::Install => Some((
+            "Install",
+            "suggested-action",
+            (|| Msg::Confirm) as fn() -> Msg,
+        )),
+        ReviewAction::InstallAnyway => Some((
+            "Install anyway",
+            "destructive-action",
+            (|| Msg::ConfirmRisky) as fn() -> Msg,
+        )),
+        ReviewAction::InstallSystemWide { .. } => Some((
+            "Install system-wide…",
+            "suggested-action",
+            (|| Msg::ConfirmNative) as fn() -> Msg,
+        )),
         ReviewAction::Blocked(_) => None,
     }
-    .map(|(label, class, risky)| {
+    .map(|(label, class, msg)| {
         let button = gtk::Button::with_label(label);
         button.add_css_class(class);
         button.connect_clicked({
             let sender = sender.clone();
-            move |_| {
-                sender.input(if risky {
-                    Msg::ConfirmRisky
-                } else {
-                    Msg::Confirm
-                })
-            }
+            move |_| sender.input(msg())
         });
         button
     });
@@ -107,6 +114,20 @@ pub fn page(plan: &InstallPlan, sender: &ComponentSender<App>) -> adw::Navigatio
     header.pack_start(&cancel);
     if let Some(install) = &install {
         header.pack_end(install);
+    }
+    if matches!(
+        action,
+        ReviewAction::InstallSystemWide {
+            for_me_only: true,
+            ..
+        }
+    ) {
+        let for_me = gtk::Button::with_label("Install for me only");
+        for_me.connect_clicked({
+            let sender = sender.clone();
+            move |_| sender.input(Msg::InstallForMeOnly)
+        });
+        header.pack_end(&for_me);
     }
 
     let toolbar = adw::ToolbarView::new();

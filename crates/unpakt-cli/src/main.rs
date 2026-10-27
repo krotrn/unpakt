@@ -217,12 +217,20 @@ impl Interrupt {
 
 fn run(command: Command) -> Result<()> {
     let interrupt = Interrupt::install();
+    let changing = AtomicBool::new(false);
+    let removing = matches!(command, Command::Remove { .. });
     let mut engine = Engine::open_default()?
         .with_cancel(interrupt.cancel.clone())
-        .with_progress(Arc::new(|event| {
-            if event == Progress::WaitingForLock {
-                eprintln!("waiting for another unpakt operation to finish…");
+        .with_progress(Arc::new(move |event| match event {
+            Progress::WaitingForLock => {
+                eprintln!("waiting for another unpakt operation to finish…")
             }
+            Progress::WaitingForAuthorization => eprintln!("waiting for authorization…"),
+            Progress::SystemChange { .. } if !changing.swap(true, Ordering::SeqCst) => {
+                let verb = if removing { "removing" } else { "installing" };
+                eprintln!("{verb} with the system package manager…");
+            }
+            _ => {}
         }));
     match command {
         Command::Add {

@@ -60,13 +60,10 @@ pub fn summary_lines(p: &InstallPlan) -> Vec<String> {
             .take(RUNNER_UPS)
             .map(|other| format!("  other: {}", other.path.display())),
     );
-    out.push(format!(
-        "command: {}",
-        p.command.as_deref().unwrap_or("(none)")
-    ));
-    out.push(format!(
-        "desktop: {}",
-        if p.want_desktop { "yes" } else { "no" }
+    out.extend(integration_lines(
+        p.route(),
+        p.command.as_deref(),
+        p.want_desktop,
     ));
     out.extend(route_line(p.route(), p.native_skipped.as_deref()));
     // The consent text already carries the compatibility verdict.
@@ -84,6 +81,18 @@ pub fn summary_lines(p: &InstallPlan) -> Vec<String> {
         out.extend(compat_lines(p.compat.as_ref(), p.native_hint.as_deref()));
     }
     out.iter().map(|line| clean(line)).collect()
+}
+
+/// The command and desktop entry an extracted install creates; a native
+/// install creates neither.
+fn integration_lines(route: Option<Route>, command: Option<&str>, desktop: bool) -> Vec<String> {
+    if route == Some(Route::Native) {
+        return Vec::new();
+    }
+    vec![
+        format!("command: {}", command.unwrap_or("(none)")),
+        format!("desktop: {}", if desktop { "yes" } else { "no" }),
+    ]
 }
 
 /// How the package will be installed, and why not system-wide when it could
@@ -165,7 +174,7 @@ pub fn print_updates(updates: &[UpdateInfo]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean, clean_lines, compat_lines, route_line, version_text};
+    use super::{clean, clean_lines, compat_lines, integration_lines, route_line, version_text};
     use unpakt_core::compat::{Finding, Verdict};
     use unpakt_core::engine::Route;
 
@@ -244,6 +253,19 @@ mod tests {
         assert_eq!(
             clean_lines("refused\n  - bad\x1b[2Jdetail"),
             "refused\n  - bad\u{FFFD}[2Jdetail"
+        );
+    }
+
+    #[test]
+    fn native_install_has_no_command_or_desktop_lines() {
+        assert!(integration_lines(Some(Route::Native), Some("hello"), true).is_empty());
+        assert_eq!(
+            integration_lines(Some(Route::Extract), Some("hello"), false),
+            ["command: hello", "desktop: no"]
+        );
+        assert_eq!(
+            integration_lines(Some(Route::Refused), None, true),
+            ["command: (none)", "desktop: yes"]
         );
     }
 

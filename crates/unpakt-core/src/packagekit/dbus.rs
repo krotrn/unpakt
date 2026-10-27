@@ -1,14 +1,17 @@
 //! PackageKit over the system D-Bus.
 //!
-//! Every bus call times out after `QUERY_TIMEOUT`. PackageKit's transaction
-//! methods return once the transaction is queued; polkit prompts and progress
-//! arrive afterwards as signals, so an install or removal has no overall
-//! deadline and a query (`Resolve`) does.
+//! Every method call is bounded by `QUERY_TIMEOUT`. The connection handshake
+//! has no timeout of its own and is bounded only in the capability probe,
+//! which runs on its own thread. PackageKit's transaction methods return once
+//! the transaction is queued; polkit prompts and progress arrive afterwards as
+//! signals, and that wait is unbounded for an install or removal, which a
+//! prompt may hold for as long as the user takes. A query (`Resolve`) waits at
+//! most `QUERY_TIMEOUT` for each call and `QUERY_TIMEOUT` more for its signals.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_lite::StreamExt;
@@ -49,8 +52,10 @@ const ERROR_NOT_AUTHORIZED: u32 = 46;
 /// How often a running transaction checks whether to cancel.
 const POLL: Duration = Duration::from_millis(200);
 
-/// How long a query (the capability probe, `Resolve`) may take before
-/// PackageKit counts as not answering.
+/// How long a bus call, and a query's wait for its signals, may take before
+/// PackageKit counts as not answering. A query is a few calls plus the wait,
+/// so it can take several times this; the capability probe as a whole takes
+/// this long at most.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Whether the `Roles` bitfield of PackageKit includes `role`.
@@ -167,10 +172,28 @@ fn next_message(
     ))
 }
 
+/// Whether a PackageKit method changes the installed packages.
+fn changes_system(method: &str) -> bool {
+    matches!(method, "InstallFiles" | "RemovePackages")
+}
+
 fn bus_error(e: zbus::Error) -> Error {
+    call_error(e, false)
+}
+
+/// Maps a failed bus call. A timed-out call that changes the system may
+/// still have been queued, which the message says.
+fn call_error(e: zbus::Error, changes_system: bool) -> Error {
     match e {
         zbus::Error::InputOutput(ref io) if io.kind() == std::io::ErrorKind::TimedOut => {
-            Error::PackageKit("PackageKit did not answer".into())
+            Error::PackageKit(
+                if changes_system {
+                    "PackageKit did not answer; the change may still be applied"
+                } else {
+                    "PackageKit did not answer"
+                }
+                .into(),
+            )
         }
         e => Error::PackageKit(e.to_string()),
     }
@@ -179,28 +202,33 @@ fn bus_error(e: zbus::Error) -> Error {
 /// PackageKit reached through the system bus. The connection opens on first
 /// use and is kept.
 pub struct Dbus {
-    conn: Mutex<Option<Connection>>,
+    conn: Arc<Mutex<Option<Connection>>>,
+}
+
+/// The kept connection, opened if there is none yet. The lock is not held
+/// while connecting, so a stuck handshake cannot block other callers.
+fn open(slot: &Mutex<Option<Connection>>) -> Result<Connection> {
+    if let Some(conn) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return Ok(conn.clone());
+    }
+    let conn = Builder::system()
+        .and_then(|b| b.method_timeout(QUERY_TIMEOUT).build())
+        .map_err(|e| {
+            Error::PackageKitUnavailable(format!("the system bus is not reachable: {e}"))
+        })?;
+    let mut kept = slot.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(kept.get_or_insert(conn).clone())
 }
 
 impl Dbus {
     pub fn new() -> Dbus {
         Dbus {
-            conn: Mutex::new(None),
+            conn: Arc::new(Mutex::new(None)),
         }
     }
 
     fn connection(&self) -> Result<Connection> {
-        let mut slot = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(conn) = slot.as_ref() {
-            return Ok(conn.clone());
-        }
-        let conn = Builder::system()
-            .and_then(|b| b.method_timeout(QUERY_TIMEOUT).build())
-            .map_err(|e| {
-                Error::PackageKitUnavailable(format!("the system bus is not reachable: {e}"))
-            })?;
-        *slot = Some(conn.clone());
-        Ok(conn)
+        open(&self.conn)
     }
 
     fn probe(conn: Connection) -> zbus::Result<bool> {
@@ -254,7 +282,8 @@ impl Dbus {
             .map_err(bus_error)?
             .into_inner();
 
-        tx.call::<_, _, ()>(method, body).map_err(bus_error)?;
+        tx.call::<_, _, ()>(method, body)
+            .map_err(|e| call_error(e, changes_system(method)))?;
 
         let (mut status, mut percentage) = (STATUS_UNKNOWN, 101);
         let mut last_event = None;
@@ -323,17 +352,15 @@ impl Default for Dbus {
 
 impl PackageKit for Dbus {
     fn can_install_files(&self) -> bool {
-        let conn = match self.connection() {
-            Ok(conn) => conn,
-            Err(e) => {
-                tracing::debug!("PackageKit is not usable: {e}");
-                return false;
-            }
-        };
-        // Bounds the probe as a whole; each of its calls also times out.
+        // The handshake has no timeout, so connecting happens on the probe's
+        // thread too and the whole probe is bounded here.
         let (send, recv) = mpsc::channel();
+        let slot = Arc::clone(&self.conn);
         std::thread::spawn(move || {
-            let _ = send.send(Dbus::probe(conn));
+            let result = open(&slot)
+                .map_err(|e| e.to_string())
+                .and_then(|conn| Dbus::probe(conn).map_err(|e| e.to_string()));
+            let _ = send.send(result);
         });
         match recv.recv_timeout(QUERY_TIMEOUT) {
             Ok(Ok(ready)) => ready,
@@ -414,6 +441,25 @@ mod tests {
                 .to_string()
                 .contains("boom")
         );
+    }
+
+    #[test]
+    fn timed_out_change_may_still_apply() {
+        let timeout = || {
+            zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::from(
+                std::io::ErrorKind::TimedOut,
+            )))
+        };
+        assert_eq!(
+            call_error(timeout(), true).to_string(),
+            "package manager error: PackageKit did not answer; the change may still be applied"
+        );
+        assert_eq!(
+            call_error(timeout(), false).to_string(),
+            "package manager error: PackageKit did not answer"
+        );
+        assert!(changes_system("InstallFiles") && changes_system("RemovePackages"));
+        assert!(!changes_system("Resolve") && !changes_system("Cancel"));
     }
 
     #[test]

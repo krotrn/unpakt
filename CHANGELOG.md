@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Install a `.deb` or `.rpm` system-wide through PackageKit when it matches
+  your system's package family. unpakt shows the compatibility verdict and the
+  package's install scripts, which run as root, and asks before installing;
+  `--yes` agrees for non-interactive use. Without PackageKit, on an image-based
+  system, or with `add --extract`, the package is unpacked into your home
+  directory as before.
+- `update` updates system-wide apps through PackageKit after asking again;
+  `update --yes` agrees without asking. If the system already has the same or a
+  newer version, unpakt records it and skips the update.
+- `remove` removes a system-wide app with your package manager. `remove
+  --forget` drops only unpakt's record and leaves the package installed.
+- The desktop app asks before a system-wide install or update, offers Install
+  for me only, and shows Waiting for authorization… while the system asks for
+  your password. Cancel works until the package manager starts changing the
+  system.
+- An interrupted system-wide install, update or removal is settled on the next
+  run by asking PackageKit what is actually installed.
+
+### Changed
+
+- Pacman packages are always unpacked into your home directory, because
+  PackageKit cannot install local `.pkg.tar.zst` or unsigned pacman packages.
+  unpakt prints the `sudo pacman -U` command if you want a system-wide install.
+- An app keeps the way it was installed when it updates: an app unpacked into
+  your home directory keeps updating that way even after PackageKit is
+  installed.
+- Missing consent for a system-wide install or update exits with status 2, like
+  other refusals.
+- Updated dependencies, including zbus 6 and rusqlite 0.41 (SQLite 3.54.1).
+
 ## [0.2.0] - 2026-10-25
 
 ### Added

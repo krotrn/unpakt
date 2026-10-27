@@ -522,6 +522,47 @@ pub fn marker_script(marker: &Path) -> Vec<u8> {
 /// `AI\x02` magic, and a gzip squashfs holding `files` right after the ELF.
 /// Only `E::File` and `E::Link` entries are supported.
 pub fn build_appimage(dir: &Path, name: &str, files: &[E]) -> PathBuf {
+    build_appimage_with(dir, name, files, backhand::compression::Compressor::Gzip)
+}
+
+/// Test-only squashfs writer codec: every block is zstd-compressed.
+struct ZstdWriter;
+
+static ZSTD_WRITER: ZstdWriter = ZstdWriter;
+
+impl backhand::compression::CompressionAction for ZstdWriter {
+    type Error = backhand::BackhandError;
+    type Compressor = backhand::compression::Compressor;
+    type FilesystemCompressor = backhand::FilesystemCompressor;
+    type SuperBlock = backhand::SuperBlock;
+
+    fn decompress(
+        &self,
+        bytes: &[u8],
+        out: &mut Vec<u8>,
+        _: Self::Compressor,
+    ) -> Result<(), Self::Error> {
+        out.extend_from_slice(&zstd::decode_all(bytes).map_err(backhand::BackhandError::StdIo)?);
+        Ok(())
+    }
+
+    fn compress(
+        &self,
+        bytes: &[u8],
+        _: Self::FilesystemCompressor,
+        _: u32,
+    ) -> Result<Vec<u8>, Self::Error> {
+        zstd::bulk::compress(bytes, 3).map_err(backhand::BackhandError::StdIo)
+    }
+}
+
+/// Like [`build_appimage`], with the squashfs compressed by `compressor`.
+pub fn build_appimage_with(
+    dir: &Path,
+    name: &str,
+    files: &[E],
+    compressor: backhand::compression::Compressor,
+) -> PathBuf {
     use backhand::{FilesystemWriter, NodeHeader};
 
     let mut image = std::fs::read("/usr/bin/true").unwrap();
@@ -530,9 +571,11 @@ pub fn build_appimage(dir: &Path, name: &str, files: &[E]) -> PathBuf {
     image[8..11].copy_from_slice(b"AI\x02");
 
     let mut writer = FilesystemWriter::default();
-    writer.set_compressor(
-        backhand::FilesystemCompressor::new(backhand::compression::Compressor::Gzip, None).unwrap(),
-    );
+    if compressor == backhand::compression::Compressor::Zstd {
+        // backhand's own zstd is off (RustSec), so this fixture compresses blocks itself.
+        writer.set_kind(backhand::kind::Kind::new_v4(&ZSTD_WRITER));
+    }
+    writer.set_compressor(backhand::FilesystemCompressor::new(compressor, None).unwrap());
     for entry in files {
         match entry {
             E::File(path, data, mode) => writer

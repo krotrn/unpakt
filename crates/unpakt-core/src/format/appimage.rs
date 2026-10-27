@@ -3,7 +3,12 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
-use backhand::{FilesystemReader, InnerNode, Node, SquashfsFileReader};
+use backhand::compression::{CompressionAction, Compressor, DefaultCompressor};
+use backhand::kind::Kind;
+use backhand::{
+    BackhandError, FilesystemCompressor, FilesystemReader, InnerNode, Node, SquashfsFileReader,
+    SuperBlock,
+};
 use goblin::elf::Elf;
 
 use super::{Confidence, FormatPlugin, read_head};
@@ -18,6 +23,48 @@ const MAX_DESKTOP_BYTES: u64 = 256 * 1024;
 const MAX_ICON_BYTES: u64 = 8 * 1024 * 1024;
 const ICON_EXTS: [&str; 3] = ["png", "svg", "xpm"];
 const ELF_MAGIC: &[u8] = b"\x7fELF";
+
+/// Squashfs codec: backhand's own, except zstd blocks are decoded with zstd 0.14
+/// (backhand's `zstd` feature pulls in a 0.13 with RustSec advisories). Reading only.
+struct SquashfsCodec;
+
+static SQUASHFS_CODEC: SquashfsCodec = SquashfsCodec;
+
+impl CompressionAction for SquashfsCodec {
+    type Error = BackhandError;
+    type Compressor = Compressor;
+    type FilesystemCompressor = FilesystemCompressor;
+    type SuperBlock = SuperBlock;
+
+    fn decompress(
+        &self,
+        bytes: &[u8],
+        out: &mut Vec<u8>,
+        compressor: Compressor,
+    ) -> std::result::Result<(), BackhandError> {
+        if compressor != Compressor::Zstd {
+            return DefaultCompressor.decompress(bytes, out, compressor);
+        }
+        // Decodes into `out`'s spare capacity (the block size), like backhand's own branch.
+        let mut decoder = zstd::bulk::Decompressor::new()
+            .map_err(|e| BackhandError::CompressionInit(format!("zstd decompressor: {e}")))?;
+        decoder
+            .decompress_to_buffer(bytes, out)
+            .map_err(BackhandError::StdIo)?;
+        Ok(())
+    }
+
+    fn compress(
+        &self,
+        bytes: &[u8],
+        fc: FilesystemCompressor,
+        block_size: u32,
+    ) -> std::result::Result<Vec<u8>, BackhandError> {
+        // unpakt never writes squashfs, so zstd compression is deliberately not wired in:
+        // with backhand's `zstd` feature off, the default compressor rejects it as unsupported.
+        DefaultCompressor.compress(bytes, fc, block_size)
+    }
+}
 /// Offset of the AppImage type marker inside the ELF identification padding.
 const TYPE_MARKER_AT: usize = 8;
 
@@ -93,8 +140,12 @@ fn read_contents(
     let elf_head = read_head(&a.path, 64)?;
     let offset = squashfs_offset(&elf_head)?;
     let file = File::open(&a.path).at(&a.path)?;
-    let fs = FilesystemReader::from_reader_with_offset(BufReader::new(file), offset)
-        .map_err(|e| Error::Parse(e.to_string()))?;
+    let fs = FilesystemReader::from_reader_with_offset_and_kind(
+        BufReader::new(file),
+        offset,
+        Kind::new_v4(&SQUASHFS_CODEC),
+    )
+    .map_err(|e| Error::Parse(e.to_string()))?;
 
     let files: Files = fs.files().map(|n| (normalize(&n.fullpath), n)).collect();
     let mut warnings = Vec::new();

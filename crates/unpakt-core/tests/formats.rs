@@ -1,9 +1,9 @@
 mod common;
 
 use common::{
-    Comp, E, RpmTags, build_appimage, build_ar, build_deb, build_elf, build_pacman, build_rpm,
-    build_rpm_full, build_rpm_with, build_tarball, electron_like_with, host_package_arch,
-    host_rpm_arch,
+    Comp, E, RpmTags, build_appimage, build_appimage_with, build_ar, build_deb, build_elf,
+    build_pacman, build_rpm, build_rpm_full, build_rpm_with, build_tarball, electron_like_with,
+    host_package_arch, host_rpm_arch,
 };
 use std::path::Path;
 use unpakt_core::Error;
@@ -289,6 +289,32 @@ fn appimage_desktop_and_symlinked_icon() {
     assert_eq!(icon.ext, "png");
     assert_eq!(icon.data, PNG);
     assert!(p.warnings.is_empty());
+}
+
+#[test]
+fn appimage_reads_a_zstd_compressed_squashfs() {
+    let d = tempfile::tempdir().unwrap();
+    // Incompressible-ish and repetitive data, so both zstd paths run.
+    let big: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let path = build_appimage_with(
+        d.path(),
+        "Zst-2.0.AppImage",
+        &[
+            E::File(
+                "app.desktop",
+                b"[Desktop Entry]\nType=Application\nName=Zst\nIcon=zst\nExec=AppRun\n",
+                0o644,
+            ),
+            E::File("zst.png", PNG, 0o644),
+            E::File("AppRun", b"#!/bin/sh\n", 0o755),
+            E::File("big.bin", &big, 0o644),
+        ],
+        backhand::compression::Compressor::Zstd,
+    );
+    let p = inspect(&path).unwrap();
+    assert_eq!(p.format, FormatKind::AppImage);
+    assert!(p.desktop.unwrap().contains("Name=Zst"));
+    assert_eq!(p.icon.unwrap().data, PNG);
 }
 
 #[test]

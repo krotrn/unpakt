@@ -276,6 +276,19 @@ new_root
 expect_status "add without --yes and no tty exits 2" 2 u add "$(url "pk-other.$ext")"
 check_not "pk-other is not installed" is_installed pk-other
 
+step "a non-root user without a polkit agent is denied"
+# Polkit asks for administrator authentication to install an untrusted local
+# package; with nobody to ask, PackageKit must report NotAuthorized and
+# unpakt must leave nothing behind.
+useradd -m pkuser
+pkroot=$(mktemp -d /tmp/pkuser-root-XXXXXX)
+chown pkuser: "$pkroot"
+expect_status "add --yes as a non-root user exits 2" 2 \
+  runuser -u pkuser -- env UNPAKT_ROOT="$pkroot" UNPAKT_PACKAGEKIT=1 "$unpakt" add --yes "$(url "pk-other.$ext")"
+check "the refusal says authorization was refused" grep -q 'authorization was refused' "$out"
+check_not "pk-other is not installed" is_installed pk-other
+check "no native journal is left" test -z "$(ls -A "$pkroot/.local/share/unpakt/native" 2>/dev/null)"
+
 step "update keeps the newer native version"
 UNPAKT_ROOT=$home_root
 export UNPAKT_ROOT

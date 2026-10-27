@@ -31,23 +31,23 @@ const SERVICE: &str = "org.freedesktop.PackageKit";
 const SERVICE_PATH: &str = "/org/freedesktop/PackageKit";
 const TRANSACTION_IFACE: &str = "org.freedesktop.PackageKit.Transaction";
 
-// Enum values count up from zero in the order of PackageKit's
-// lib/pk-enum.h (PkRoleEnum, PkStatusEnum, PkExitEnum, PkFilterEnum,
-// PkErrorEnum); D-Bus sends them as plain integers.
+// The wire values of PackageKit 1.2.x to 1.4.x: each enum counts up from zero
+// in the order of lib/pk-enum.h (PkRoleEnum, PkStatusEnum, PkExitEnum,
+// PkFilterEnum, PkErrorEnum), and D-Bus sends them as plain integers.
 const ROLE_INSTALL_FILES: u32 = 10;
 const STATUS_UNKNOWN: u32 = 0;
 const STATUS_WAIT: u32 = 1;
 const STATUS_SETUP: u32 = 2;
 const STATUS_FINISHED: u32 = 18;
-const STATUS_WAITING_FOR_LOCK: u32 = 27;
-const STATUS_WAITING_FOR_AUTH: u32 = 28;
+const STATUS_WAITING_FOR_LOCK: u32 = 30;
+const STATUS_WAITING_FOR_AUTH: u32 = 31;
 const EXIT_SUCCESS: u32 = 1;
 const EXIT_CANCELLED: u32 = 3;
 const FILTER_INSTALLED: u32 = 2;
 #[cfg(test)]
 const ERROR_DEP_RESOLUTION_FAILED: u32 = 13;
 const ERROR_TRANSACTION_CANCELLED: u32 = 17;
-const ERROR_NOT_AUTHORIZED: u32 = 46;
+const ERROR_NOT_AUTHORIZED: u32 = 48;
 
 /// How often a running transaction checks whether to cancel.
 const POLL: Duration = Duration::from_millis(200);
@@ -460,6 +460,23 @@ mod tests {
         );
         assert!(changes_system("InstallFiles") && changes_system("RemovePackages"));
         assert!(!changes_system("Resolve") && !changes_system("Cancel"));
+    }
+
+    #[test]
+    fn enum_values_are_the_wire_values() {
+        assert_eq!(ROLE_INSTALL_FILES, 10);
+        assert_eq!(STATUS_UNKNOWN, 0);
+        assert_eq!(STATUS_WAIT, 1);
+        assert_eq!(STATUS_SETUP, 2);
+        assert_eq!(STATUS_FINISHED, 18);
+        assert_eq!(STATUS_WAITING_FOR_LOCK, 30);
+        assert_eq!(STATUS_WAITING_FOR_AUTH, 31);
+        assert_eq!(EXIT_SUCCESS, 1);
+        assert_eq!(EXIT_CANCELLED, 3);
+        assert_eq!(FILTER_INSTALLED, 2);
+        assert_eq!(ERROR_DEP_RESOLUTION_FAILED, 13);
+        assert_eq!(ERROR_TRANSACTION_CANCELLED, 17);
+        assert_eq!(ERROR_NOT_AUTHORIZED, 48);
     }
 
     #[test]

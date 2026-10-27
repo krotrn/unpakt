@@ -4,6 +4,22 @@ use super::*;
 use crate::packagekit::PkEvent;
 use crate::packagekit::journal::{NativeIntent, NativeJournal, NativeOp, NativeRecord};
 
+/// The progress event a PackageKit event stands for.
+fn progress_of(event: PkEvent) -> Progress {
+    match event {
+        PkEvent::WaitingForAuth => Progress::WaitingForAuthorization,
+        PkEvent::Changing { percent } => Progress::SystemChange { percent },
+    }
+}
+
+/// Deletes a settled journal; failing to is only worth a warning, because
+/// recovery drops a journal whose outcome it finds already recorded.
+fn settle_journal(id: &str, journal: NativeJournal) {
+    if let Err(e) = journal.finish() {
+        tracing::warn!("{id}: could not remove the native journal: {e}");
+    }
+}
+
 /// The path the package's program is run from once installed: the
 /// `usr/bin`/`bin` link that leads to the entry, else the entry itself, else
 /// `/usr/bin/<package name>`.
@@ -102,19 +118,14 @@ impl Engine {
         let result = self
             .packagekit
             .install_file(artifact, &self.cancel, &mut |event| {
-                self.emit(match event {
-                    PkEvent::WaitingForAuth => Progress::WaitingForAuthorization,
-                    PkEvent::Changing { percent } => Progress::SystemChange { percent },
-                })
+                self.emit(progress_of(event))
             });
         match result {
             Ok(()) => {}
             // Nothing was changed; any other failure may have been applied
             // after we stopped listening, so the journal stays for recovery.
             Err(e @ (Error::Refused(_) | Error::Interrupted)) => {
-                if let Err(settle) = journal.finish() {
-                    tracing::warn!("{id}: could not remove the native journal: {settle}");
-                }
+                settle_journal(id, journal);
                 return Err(e);
             }
             Err(e) => return Err(e),
@@ -139,7 +150,7 @@ impl Engine {
         stored.push(("pk.package_id", &installed.id));
         self.manifest
             .commit_native_version(&app, &version, &stored)?;
-        journal.finish()?;
+        settle_journal(id, journal);
         Ok(app)
     }
 
@@ -284,9 +295,7 @@ impl Engine {
         // is still installed.
         match self.packagekit.resolve_installed(&pk_name) {
             Err(e) => {
-                if let Err(settle) = journal.finish() {
-                    tracing::warn!("{id}: could not remove the native journal: {settle}");
-                }
+                settle_journal(id, journal);
                 return Err(e);
             }
             Ok(Some(package)) => {
@@ -294,22 +303,18 @@ impl Engine {
                 let result = self
                     .packagekit
                     .remove(&package.id, &self.cancel, &mut |event| {
-                        self.emit(match event {
-                            PkEvent::WaitingForAuth => Progress::WaitingForAuthorization,
-                            PkEvent::Changing { percent } => Progress::SystemChange { percent },
-                        })
+                        self.emit(progress_of(event))
                     });
                 if let Err(e) = result {
-                    if let Err(settle) = journal.finish() {
-                        tracing::warn!("{id}: could not remove the native journal: {settle}");
-                    }
+                    settle_journal(id, journal);
                     return Err(e);
                 }
             }
             Ok(None) => {}
         }
         self.manifest.remove(id)?;
-        journal.finish()
+        settle_journal(id, journal);
+        Ok(())
     }
 }
 

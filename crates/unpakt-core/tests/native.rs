@@ -525,6 +525,29 @@ fn cancel_after_changes_start_still_records() {
 }
 
 #[test]
+fn lost_journal_after_success_is_not_an_error() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().events = vec![PkEvent::Changing { percent: Some(50) }];
+    let deb = hello_deb(src.path(), None);
+    let native = Layout::under(root.path()).data.join("native");
+    let f: ProgressFn = Arc::new(move |p| {
+        if matches!(p, Progress::SystemChange { .. }) {
+            for entry in std::fs::read_dir(&native).unwrap() {
+                std::fs::remove_file(entry.unwrap().path()).unwrap();
+            }
+        }
+    });
+    let mut engine = native_engine(root.path(), &pk).with_progress(f);
+    let plan = native_plan(&engine, &deb, true);
+    engine.install(plan).unwrap();
+    assert_eq!(engine.list().unwrap().len(), 1);
+    engine.remove("hello").unwrap();
+    assert!(engine.list().unwrap().is_empty());
+}
+
+#[test]
 fn already_installed_is_a_conflict() {
     let src = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();

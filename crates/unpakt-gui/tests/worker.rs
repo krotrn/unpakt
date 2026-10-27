@@ -438,7 +438,8 @@ fn serve(mut stream: std::net::TcpStream, port: u16, tag: &str) -> std::io::Resu
 /// A native `hello` 1.0 installed from the forge's release.
 fn native_hello(root: &Path, forge: &Forge) -> Engine {
     let fake = FakePk::default();
-    fake.0.lock().unwrap().next_install = PkPackage::parse("hello;1.0;amd64;local");
+    fake.0.lock().unwrap().next_install =
+        PkPackage::parse(&format!("hello;1.0;{};local", host_deb_arch()));
     let host = Host {
         os_id: Some("debian".into()),
         os_like: vec![],
@@ -455,7 +456,8 @@ fn native_hello(root: &Path, forge: &Forge) -> Engine {
         .unwrap();
     plan.native_consent = true;
     eng.install(plan).unwrap();
-    fake.0.lock().unwrap().next_install = PkPackage::parse("hello;2.0;amd64;local");
+    fake.0.lock().unwrap().next_install =
+        PkPackage::parse(&format!("hello;2.0;{};local", host_deb_arch()));
     eng
 }
 

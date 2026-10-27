@@ -204,6 +204,8 @@ pub struct Model {
     last_inspect: Option<(String, AddOpts)>,
     /// Where the answer to the native update question goes.
     native_reply: Option<std::sync::mpsc::Sender<bool>>,
+    /// The last native update question was answered no.
+    native_declined: bool,
 }
 
 /// What the view must do after an event.
@@ -339,6 +341,11 @@ impl Model {
 
         // The worker is waiting for the answer; the operation stays running.
         if let Event::ConfirmNative { message, reply, .. } = e {
+            // Closing already: nobody is left to ask.
+            if self.close_requested {
+                let _ = reply.send(false);
+                return Effect::None;
+            }
             self.native_reply = Some(reply.clone());
             return Effect::AskNativeUpdate {
                 message: message.clone(),
@@ -402,11 +409,17 @@ impl Model {
         self.cancel = None;
         self.list_pending = false;
 
+        let declined = std::mem::take(&mut self.native_declined);
         let effect = match e {
             Event::Failed {
                 error: Error::Interrupted,
                 ..
             } => Effect::Toast("Cancelled".into()),
+            // The person said no; that is a choice, not a failure.
+            Event::Failed {
+                op: Op::Update,
+                error: Error::Refused(_),
+            } if declined => Effect::Toast("Update cancelled".into()),
             Event::Failed {
                 op: Op::Install,
                 error: Error::Shadowed { command, by },
@@ -441,6 +454,7 @@ impl Model {
     pub fn answer_native(&mut self, yes: bool) {
         if let Some(reply) = self.native_reply.take() {
             let _ = reply.send(yes);
+            self.native_declined = !yes;
         }
     }
 
@@ -1347,6 +1361,63 @@ mod tests {
         });
         assert!(!m.request_close());
         assert!(m.close_requested);
+        assert_eq!(rx.try_recv(), Ok(false));
+    }
+
+    fn ask_native(m: &mut Model) -> std::sync::mpsc::Receiver<bool> {
+        let (reply, rx) = std::sync::mpsc::channel();
+        m.on_event(&Event::ConfirmNative {
+            id: "a".into(),
+            message: "m".into(),
+            reply,
+        });
+        rx
+    }
+
+    #[test]
+    fn declined_native_update_is_a_toast() {
+        let mut m = Model::default();
+        m.start(Op::Update);
+        ask_native(&mut m);
+        m.answer_native(false);
+        let effect = m.on_event(&Event::Failed {
+            op: Op::Update,
+            error: Error::Refused("update of a declined; current version kept".into()),
+        });
+        assert_eq!(effect, Effect::Toast("Update cancelled".into()));
+        assert_eq!(m.busy, Busy::Idle);
+    }
+
+    #[test]
+    fn refused_update_without_a_decline_is_an_error() {
+        let mut m = Model::default();
+        m.start(Op::Update);
+        let refused = || Event::Failed {
+            op: Op::Update,
+            error: Error::Refused("nope".into()),
+        };
+        assert!(matches!(m.on_event(&refused()), Effect::ShowError { .. }));
+        // A decline does not carry over to a later, different refusal.
+        m.start(Op::Update);
+        ask_native(&mut m);
+        m.answer_native(false);
+        m.on_event(&refused());
+        m.start(Op::Update);
+        assert!(matches!(m.on_event(&refused()), Effect::ShowError { .. }));
+    }
+
+    #[test]
+    fn confirm_native_while_closing_declines_without_asking() {
+        let mut m = Model::default();
+        m.start(Op::Update);
+        assert!(!m.request_close());
+        let (reply, rx) = std::sync::mpsc::channel();
+        let effect = m.on_event(&Event::ConfirmNative {
+            id: "a".into(),
+            message: "m".into(),
+            reply,
+        });
+        assert_eq!(effect, Effect::None);
         assert_eq!(rx.try_recv(), Ok(false));
     }
 }

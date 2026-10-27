@@ -24,15 +24,21 @@ pub struct FakePk(pub Arc<Mutex<FakeState>>);
 
 impl FakePk {
     /// Emits the scripted events, stopping with `Interrupted` when `cancel`
-    /// is set by the time the first `Changing` (or the end) comes up.
+    /// is set by the time the first `Changing` (or the end, when there is
+    /// none) comes up. Once changes have started, cancel is ignored.
     fn emit(events: &[PkEvent], cancel: &Cancel, on: &mut dyn FnMut(PkEvent)) -> Result<()> {
+        let mut changing = false;
         for event in events {
-            if matches!(event, PkEvent::Changing { .. }) {
+            if matches!(event, PkEvent::Changing { .. }) && !changing {
                 cancel.check()?;
+                changing = true;
             }
             on(*event);
         }
-        cancel.check()
+        if !changing {
+            cancel.check()?;
+        }
+        Ok(())
     }
 }
 

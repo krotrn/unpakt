@@ -191,18 +191,25 @@ pub(crate) fn recover_native(
 }
 
 /// Commits the rows of an install or update PackageKit confirmed, unless the
-/// manifest already shows them.
+/// manifest already shows them or holds the app as a user-directory install,
+/// which the native record must not replace.
 fn record_landed(
     manifest: &mut Manifest,
     intent: &NativeIntent,
     record: &NativeRecord,
     package_id: &str,
 ) -> Result<()> {
-    if manifest
-        .get(&intent.app)?
-        .is_some_and(|app| app.current == record.label)
-    {
-        return Ok(());
+    if let Some(existing) = manifest.get(&intent.app)? {
+        if existing.backend != "packagekit" {
+            tracing::warn!(
+                "{} is installed in your user directory; not recording the system package",
+                intent.app
+            );
+            return Ok(());
+        }
+        if existing.current == record.label {
+            return Ok(());
+        }
     }
     let app = record.app_record(&intent.app)?;
     let version = record.version_record();
@@ -220,7 +227,7 @@ mod tests {
     use super::*;
     use crate::cancel::Cancel;
     use crate::lock;
-    use crate::manifest::Manifest;
+    use crate::manifest::{FileKind, FileRecord, Manifest};
     use crate::packagekit::{PackageKit, PkEvent, PkPackage};
 
     struct Resolver {
@@ -428,6 +435,36 @@ mod tests {
         }
         assert_eq!(installed(&manifest).unwrap().current, "1.0");
         assert_eq!(manifest.versions("hello").unwrap().len(), 2);
+        assert!(NativeJournal::pending(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn user_directory_app_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        let record = intent().record.unwrap();
+        let mut app = record.app_record("hello").unwrap();
+        app.backend = "extract".into();
+        app.current = "0.9".into();
+        let mut version = record.version_record();
+        version.label = "0.9".into();
+        let files = [FileRecord {
+            path: PathBuf::from("/home/u/.local/bin/hello"),
+            kind: FileKind::Bin,
+        }];
+        manifest
+            .commit_install_with(&app, &version, &files, &[], &[])
+            .unwrap();
+        journaled(dir.path(), NativeOp::Install, "1.0");
+        let pk = resolver(Some("hello;1.0;amd64;local"));
+        assert_eq!(settle(dir.path(), &mut manifest, &pk).unwrap(), 1);
+        let kept = installed(&manifest).unwrap();
+        assert_eq!(
+            (kept.backend.as_str(), kept.current.as_str()),
+            ("extract", "0.9")
+        );
+        assert_eq!(manifest.versions("hello").unwrap().len(), 1);
+        assert_eq!(manifest.files("hello").unwrap().len(), 1);
         assert!(NativeJournal::pending(dir.path()).unwrap().is_empty());
     }
 

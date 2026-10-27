@@ -39,6 +39,8 @@ use crate::source::{for_kind, resolve};
 use crate::version::is_newer;
 use crate::{Layout, Txn};
 
+mod native;
+
 const UPDATE_DESKTOP_DATABASE: &str = "update-desktop-database";
 
 /// Shortest gap between two download progress events.
@@ -354,6 +356,12 @@ fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) 
 /// The name of a `usr/bin` or `bin` link that points at `entry`, which is what
 /// the package's own users type to start it.
 fn bin_link_name(index: &PayloadIndex, entry: &Path) -> Option<String> {
+    bin_link(index, entry)
+        .and_then(|link| link.file_name().map(|n| n.to_string_lossy().into_owned()))
+}
+
+/// The `usr/bin` or `bin` link, with a usable command name, that resolves to `entry`.
+fn bin_link<'a>(index: &'a PayloadIndex, entry: &Path) -> Option<&'a PathBuf> {
     index
         .links
         .keys()
@@ -362,9 +370,10 @@ fn bin_link_name(index: &PayloadIndex, entry: &Path) -> Option<String> {
                 .is_some_and(|d| d == Path::new("usr/bin") || d == Path::new("bin"))
         })
         .filter(|link| resolve_in_payload(index, link).as_deref() == Some(entry))
-        .filter_map(|link| link.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .find(|n| validate_command(n).is_ok())
+        .find(|link| {
+            link.file_name()
+                .is_some_and(|n| validate_command(&n.to_string_lossy()).is_ok())
+        })
 }
 
 /// An update refusal: `message`, the blocking findings (only those tagged
@@ -885,6 +894,9 @@ impl Engine {
     }
 
     pub fn install(&mut self, p: InstallPlan) -> Result<AppRecord> {
+        if p.backend == NATIVE_BACKEND {
+            return self.install_native(p);
+        }
         let _download = self.download_guard(&p.plan.artifact.path);
         if let Some(error) = p.refusal() {
             return Err(error);

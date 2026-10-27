@@ -1,12 +1,16 @@
 mod common;
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use common::fake_pk::FakePk;
 use unpakt_core::cancel::Cancel;
 use unpakt_core::engine::{AddOpts, Engine, Route};
 use unpakt_core::host::Host;
+use unpakt_core::http::Http;
+use unpakt_core::manifest::Manifest;
 use unpakt_core::packagekit::{PackageKit, PkEvent, PkPackage};
+use unpakt_core::progress::{Progress, ProgressFn};
 use unpakt_core::{Error, Layout};
 
 fn fake() -> FakePk {
@@ -235,4 +239,256 @@ fn tarball_has_no_route() {
         .unwrap();
     assert_eq!(plan.route(), None);
     assert!(plan.consent().is_none());
+}
+
+fn hello_fake() -> FakePk {
+    let pk = FakePk::default();
+    {
+        let mut state = pk.0.lock().unwrap();
+        state.can_install = true;
+        state.next_install = PkPackage::parse("hello;1.0;amd64;local");
+    }
+    pk
+}
+
+fn native_plan(engine: &Engine, deb: &Path, consent: bool) -> unpakt_core::engine::InstallPlan {
+    let mut plan = engine
+        .inspect(deb.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    assert_eq!(plan.route(), Some(Route::Native));
+    plan.native_consent = consent;
+    plan
+}
+
+fn journals(layout: &Layout) -> usize {
+    std::fs::read_dir(layout.data.join("native"))
+        .map(|dir| {
+            dir.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn installs(pk: &FakePk) -> usize {
+    let state = pk.0.lock().unwrap();
+    state
+        .calls
+        .iter()
+        .filter(|c| c.starts_with("install "))
+        .count()
+}
+
+#[test]
+fn native_install_needs_consent() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let deb = hello_deb(src.path(), Some(POSTINST));
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, false);
+    match engine.install(plan) {
+        Err(Error::NeedsConsent(m)) => assert!(m.contains("will run as root"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(installs(&pk), 0);
+    assert!(engine.list().unwrap().is_empty());
+}
+
+#[test]
+fn native_install_records_app() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let deb = hello_deb(src.path(), Some(POSTINST));
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    let app = engine.install(plan).unwrap();
+    assert_eq!(app.backend, "packagekit");
+    assert!(!app.desktop);
+    assert!(app.command.is_none());
+    let (_, versions, files) = engine.get("hello").unwrap();
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].entry, Path::new("/usr/bin/hello"));
+    assert!(files.is_empty());
+    let layout = engine.layout();
+    assert!(!layout.apps.join("hello").exists());
+    let desktops = std::fs::read_dir(&layout.applications)
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(desktops, 0);
+    assert_eq!(journals(layout), 0);
+}
+
+#[test]
+fn native_install_records_package_options() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let deb = hello_deb(src.path(), None);
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    engine.install(plan).unwrap();
+    let manifest = Manifest::open(&Layout::under(root.path()).db).unwrap();
+    let get = |k: &str| manifest.option("hello", k).unwrap();
+    assert_eq!(
+        get("pk.package_id").as_deref(),
+        Some("hello;1.0;amd64;local")
+    );
+    assert_eq!(get("pk.name").as_deref(), Some("hello"));
+}
+
+#[test]
+fn native_install_gets_an_existing_absolute_file() {
+    let forge = common::MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let deb = hello_deb(src.path(), None);
+    forge.publish(
+        "1.0",
+        vec![("hello_1.0.deb".into(), std::fs::read(&deb).unwrap())],
+    );
+    let mut engine =
+        native_engine(root.path(), &pk).with_http(Http::new(&forge.api_url(), None).unwrap());
+    let mut plan = engine
+        .inspect("https://github.com/o/r", AddOpts::default())
+        .unwrap();
+    plan.native_consent = true;
+    engine.install(plan).unwrap();
+    let state = pk.0.lock().unwrap();
+    let call = state
+        .calls
+        .iter()
+        .find(|c| c.starts_with("install "))
+        .unwrap();
+    assert!(Path::new(&call["install ".len()..]).is_absolute(), "{call}");
+    assert_eq!(state.file_existed, [true]);
+}
+
+fn recorder() -> (ProgressFn, Arc<Mutex<Vec<Progress>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let f: ProgressFn = Arc::new(move |p| sink.lock().unwrap().push(p));
+    (f, events)
+}
+
+#[test]
+fn native_progress_events() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().events = vec![
+        PkEvent::WaitingForAuth,
+        PkEvent::Changing { percent: Some(50) },
+    ];
+    let deb = hello_deb(src.path(), None);
+    let (recorder, events) = recorder();
+    let mut engine = native_engine(root.path(), &pk).with_progress(recorder);
+    let plan = native_plan(&engine, &deb, true);
+    engine.install(plan).unwrap();
+    let events = events.lock().unwrap();
+    let tail: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Progress::WaitingForAuthorization | Progress::SystemChange { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            &Progress::WaitingForAuthorization,
+            &Progress::SystemChange { percent: Some(50) }
+        ]
+    );
+}
+
+#[test]
+fn denied_authorization_records_nothing() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().fail_install =
+        Some(|| Error::Refused("authorization was refused; nothing was changed".into()));
+    let deb = hello_deb(src.path(), None);
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    assert!(matches!(engine.install(plan), Err(Error::Refused(_))));
+    assert!(engine.list().unwrap().is_empty());
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn failed_install_keeps_journal_for_recovery() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().fail_install = Some(|| {
+        Error::PackageKit("PackageKit did not answer; the change may still be applied".into())
+    });
+    let deb = hello_deb(src.path(), None);
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    assert!(matches!(engine.install(plan), Err(Error::PackageKit(_))));
+    assert!(engine.list().unwrap().is_empty());
+    assert_eq!(journals(engine.layout()), 1);
+}
+
+#[test]
+fn cancel_while_waiting_installs_nothing() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().events =
+        vec![PkEvent::WaitingForAuth, PkEvent::Changing { percent: None }];
+    let deb = hello_deb(src.path(), None);
+    let cancel = Cancel::new();
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    engine.set_cancel(cancel.clone());
+    cancel.cancel();
+    assert!(matches!(engine.install(plan), Err(Error::Interrupted)));
+    assert!(pk.0.lock().unwrap().installed.is_empty());
+    assert!(engine.list().unwrap().is_empty());
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn cancel_after_changes_start_still_records() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().events =
+        vec![PkEvent::WaitingForAuth, PkEvent::Changing { percent: None }];
+    let deb = hello_deb(src.path(), None);
+    let cancel = Cancel::new();
+    let flag = cancel.clone();
+    let f: ProgressFn = Arc::new(move |p| {
+        if matches!(p, Progress::SystemChange { .. }) {
+            flag.cancel();
+        }
+    });
+    let mut engine = native_engine(root.path(), &pk)
+        .with_cancel(cancel)
+        .with_progress(f);
+    let plan = native_plan(&engine, &deb, true);
+    engine.install(plan).unwrap();
+    assert_eq!(engine.list().unwrap().len(), 1);
+}
+
+#[test]
+fn already_installed_is_a_conflict() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let deb = hello_deb(src.path(), None);
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    engine.install(plan).unwrap();
+    let again = native_plan(&engine, &deb, true);
+    assert!(matches!(engine.install(again), Err(Error::Conflict(_))));
+    assert_eq!(installs(&pk), 1);
 }

@@ -1,6 +1,7 @@
 //! The system package manager, reached through PackageKit.
 
 pub mod dbus;
+pub(crate) mod journal;
 
 use std::path::Path;
 

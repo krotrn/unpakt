@@ -290,7 +290,8 @@ fn uncommitted_journal_is_undone() {
         r,
         Recovered {
             finished: 0,
-            undone: 1
+            undone: 1,
+            native: 0,
         }
     );
     assert_eq!(tree_snapshot(root.path()), before);
@@ -313,7 +314,8 @@ fn committed_journal_is_finished() {
         r,
         Recovered {
             finished: 1,
-            undone: 0
+            undone: 0,
+            native: 0,
         }
     );
     assert!(!layout.apps.join(&id).exists());
@@ -490,7 +492,8 @@ fn failed_undo_keeps_the_journal_for_retry() {
         r,
         Recovered {
             finished: 0,
-            undone: 1
+            undone: 1,
+            native: 0,
         }
     );
     assert!(layout.apps.join(&id).join("current").exists());
@@ -555,7 +558,8 @@ fn crash_during_backup_purge_is_finished() {
         r,
         Recovered {
             finished: 1,
-            undone: 0
+            undone: 0,
+            native: 0,
         }
     );
     assert_eq!(std::fs::read(&file).unwrap(), b"new");

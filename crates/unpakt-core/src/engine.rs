@@ -31,6 +31,7 @@ use crate::model::{
 };
 use crate::naming::{slug, validate_command, version_label};
 use crate::packagekit::dbus::Dbus;
+use crate::packagekit::journal::{NativeJournal, recover_native};
 use crate::packagekit::{PackageKit, Unavailable};
 use crate::progress::{Progress, ProgressFn};
 use crate::recover::{Recovered, journals, recover};
@@ -534,6 +535,7 @@ impl Engine {
     fn begin(&mut self) -> Result<WriteLock> {
         let lock = self.take_lock()?;
         recover(&lock, &self.layout, &self.manifest)?;
+        self.recover_native(&lock)?;
         self.cancel.check()?;
         Ok(lock)
     }
@@ -541,7 +543,19 @@ impl Engine {
     /// Undoes or finishes the operations that crashed processes left behind.
     pub fn recover(&mut self) -> Result<Recovered> {
         let lock = self.take_lock()?;
-        recover(&lock, &self.layout, &self.manifest)
+        let mut recovered = recover(&lock, &self.layout, &self.manifest)?;
+        recovered.native = self.recover_native(&lock)?;
+        Ok(recovered)
+    }
+
+    /// Settles the system package operations a crashed process left behind.
+    fn recover_native(&mut self, lock: &WriteLock) -> Result<usize> {
+        recover_native(
+            lock,
+            &self.layout.data.join("native"),
+            &mut self.manifest,
+            self.packagekit.as_ref(),
+        )
     }
 
     /// A transaction whose steps are journaled for `app`, which must show
@@ -1426,28 +1440,44 @@ impl Engine {
 
     fn check_journal(&self) -> Check {
         let name = "journal".to_string();
+        let mut problems = Vec::new();
         match journals(&self.layout.data.join("journal")) {
-            Ok(files) if files.is_empty() => Check {
+            Ok(files) if files.is_empty() => {}
+            Ok(files) => {
+                let list: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+                problems.push(format!(
+                    "unfinished operations are recorded in {}; the next change tries to recover them and is refused until they are repaired or removed",
+                    list.join(", ")
+                ));
+            }
+            Err(e) => problems.push(format!("cannot read the journal directory: {e}")),
+        }
+        match NativeJournal::pending(&self.layout.data.join("native")) {
+            Ok(pending) if pending.is_empty() => {}
+            Ok(pending) => {
+                let list: Vec<String> = pending
+                    .iter()
+                    .map(|(path, _)| path.display().to_string())
+                    .collect();
+                problems.push(format!(
+                    "unfinished system package operations are recorded in {}; they are settled once PackageKit is reachable",
+                    list.join(", ")
+                ));
+            }
+            Err(e) => problems.push(format!("cannot read the native journals: {e}")),
+        }
+        if problems.is_empty() {
+            Check {
                 name,
                 ok: true,
                 detail: "no unfinished operations".into(),
-            },
-            Ok(files) => {
-                let list: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
-                Check {
-                    name,
-                    ok: false,
-                    detail: format!(
-                        "unfinished operations are recorded in {}; the next change tries to recover them and is refused until they are repaired or removed",
-                        list.join(", ")
-                    ),
-                }
             }
-            Err(e) => Check {
+        } else {
+            Check {
                 name,
                 ok: false,
-                detail: format!("cannot read the journal directory: {e}"),
-            },
+                detail: problems.join("; "),
+            }
         }
     }
 

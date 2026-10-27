@@ -15,11 +15,13 @@ use crate::manifest::Manifest;
 use crate::paths::Layout;
 use crate::txn::{Undo, purge, undo_step};
 
-/// How many journals recovery finished and how many it rolled back.
+/// How many journals recovery finished, how many it rolled back, and how many
+/// system package operations it settled.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Recovered {
     pub finished: usize,
     pub undone: usize,
+    pub native: usize,
 }
 
 /// The journal files in `dir`, sorted by name.
@@ -180,7 +182,8 @@ mod tests {
             r,
             Recovered {
                 finished: 0,
-                undone: 1
+                undone: 1,
+                native: 0
             }
         );
         assert_eq!(fs::read(&a).unwrap(), b"keep");

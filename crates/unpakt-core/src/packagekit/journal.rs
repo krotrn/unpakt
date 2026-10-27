@@ -5,14 +5,19 @@
 //! means the process died, or the answer was lost, between the system change
 //! and the manifest commit; whoever opens the manifest next settles it.
 
+use crate::engine::KEEP_VERSIONS;
 use crate::error::{Error, IoResultExt, Result};
-use crate::manifest::{AppRecord, VersionRecord};
+use crate::lock::WriteLock;
+use crate::manifest::{AppRecord, Manifest, VersionRecord};
 use crate::model::{ExecKind, FormatKind, SourceCfg, SourceKind};
+use crate::packagekit::PackageKit;
+use crate::version::compare_package;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -93,7 +98,7 @@ impl NativeJournal {
     /// Writes `<dir>/<pid>-<n>.json` holding the intent, durably.
     pub(crate) fn create(dir: &Path, intent: &NativeIntent) -> Result<NativeJournal> {
         fs::create_dir_all(dir).at(dir)?;
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let path = dir.join(format!("{}-{n}.json", std::process::id()));
         let text = serde_json::to_string(intent).map_err(|e| Error::Parse(e.to_string()))?;
         let mut file = fs::OpenOptions::new()
@@ -113,7 +118,6 @@ impl NativeJournal {
     }
 
     /// The journals left in `dir`, sorted by file name.
-    #[allow(dead_code)] // read by native recovery, which is not wired in yet
     pub(crate) fn pending(dir: &Path) -> Result<Vec<(PathBuf, NativeIntent)>> {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
@@ -141,9 +145,259 @@ impl NativeJournal {
     }
 }
 
+/// Settles the journals in `dir` by asking PackageKit what is installed, and
+/// returns how many it settled. A journal whose question PackageKit cannot
+/// answer stays for the next run. Holding `_lock` guarantees no live process
+/// owns a journal. An install or remove is never retried here.
+pub(crate) fn recover_native(
+    _lock: &WriteLock,
+    dir: &Path,
+    manifest: &mut Manifest,
+    pk: &dyn PackageKit,
+) -> Result<usize> {
+    let mut settled = 0;
+    for (path, intent) in NativeJournal::pending(dir)? {
+        let installed = match pk.resolve_installed(&intent.pk_name) {
+            Ok(installed) => installed,
+            Err(e) => {
+                tracing::warn!("cannot settle {} for {}: {e}", path.display(), intent.app);
+                continue;
+            }
+        };
+        match intent.op {
+            NativeOp::Install | NativeOp::Update => {
+                let landed = installed
+                    .filter(|p| compare_package(&p.version, &intent.version) == Ordering::Equal);
+                if let (Some(installed), Some(record)) = (landed, &intent.record) {
+                    record_landed(manifest, &intent, record, &installed.id)?;
+                    tracing::warn!(
+                        "recorded {} {} from {}",
+                        intent.app,
+                        intent.version,
+                        path.display()
+                    );
+                }
+            }
+            NativeOp::Remove => {
+                if installed.is_none() && manifest.get(&intent.app)?.is_some() {
+                    manifest.remove(&intent.app)?;
+                    tracing::warn!("forgot {} from {}", intent.app, path.display());
+                }
+            }
+        }
+        fs::remove_file(&path).at(&path)?;
+        settled += 1;
+    }
+    Ok(settled)
+}
+
+/// Commits the rows of an install or update PackageKit confirmed, unless the
+/// manifest already shows them.
+fn record_landed(
+    manifest: &mut Manifest,
+    intent: &NativeIntent,
+    record: &NativeRecord,
+    package_id: &str,
+) -> Result<()> {
+    if manifest
+        .get(&intent.app)?
+        .is_some_and(|app| app.current == record.label)
+    {
+        return Ok(());
+    }
+    let app = record.app_record(&intent.app)?;
+    let version = record.version_record();
+    let mut stored: Vec<(&str, &str)> = record
+        .options
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    stored.push(("pk.package_id", package_id));
+    let pruned: Vec<String> = if intent.op == NativeOp::Update {
+        manifest
+            .versions(&intent.app)?
+            .into_iter()
+            .skip(KEEP_VERSIONS - 1)
+            .filter(|v| v.label != record.label)
+            .map(|v| v.label)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let pruned: Vec<&str> = pruned.iter().map(String::as_str).collect();
+    manifest.commit_install_with(&app, &version, &[], &stored, &pruned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancel::Cancel;
+    use crate::lock;
+    use crate::manifest::Manifest;
+    use crate::packagekit::{PackageKit, PkEvent, PkPackage};
+
+    struct Resolver {
+        pkg: Option<PkPackage>,
+        fail: bool,
+    }
+
+    impl PackageKit for Resolver {
+        fn can_install_files(&self) -> bool {
+            true
+        }
+
+        fn resolve_installed(&self, _name: &str) -> Result<Option<PkPackage>> {
+            if self.fail {
+                return Err(Error::PackageKitUnavailable("no bus".into()));
+            }
+            Ok(self.pkg.clone())
+        }
+
+        fn install_file(&self, _: &Path, _: &Cancel, _: &mut dyn FnMut(PkEvent)) -> Result<()> {
+            unreachable!("recovery never installs")
+        }
+
+        fn remove(&self, _: &str, _: &Cancel, _: &mut dyn FnMut(PkEvent)) -> Result<()> {
+            unreachable!("recovery never removes")
+        }
+    }
+
+    fn resolver(id: Option<&str>) -> Resolver {
+        Resolver {
+            pkg: id.map(|id| PkPackage::parse(id).unwrap()),
+            fail: false,
+        }
+    }
+
+    /// Settles the journals in `dir` against `manifest`.
+    fn settle(dir: &Path, manifest: &mut Manifest, pk: &Resolver) -> Result<usize> {
+        let lock_dir = tempfile::tempdir().unwrap();
+        let lock = lock::acquire(&lock_dir.path().join("lock"), || {}).unwrap();
+        recover_native(&lock, dir, manifest, pk)
+    }
+
+    fn journaled(dir: &Path, op: NativeOp, version: &str) {
+        let mut intent = intent();
+        intent.op = op;
+        intent.version = version.into();
+        if intent.op == NativeOp::Remove {
+            intent.record = None;
+        }
+        NativeJournal::create(dir, &intent).unwrap();
+    }
+
+    fn installed(manifest: &Manifest) -> Option<AppRecord> {
+        manifest.get("hello").unwrap()
+    }
+
+    #[test]
+    fn installed_package_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        journaled(dir.path(), NativeOp::Install, "1.0");
+        let pk = resolver(Some("hello;1.0;amd64;local"));
+        assert_eq!(settle(dir.path(), &mut manifest, &pk).unwrap(), 1);
+        assert_eq!(installed(&manifest).unwrap().backend, "packagekit");
+        assert_eq!(
+            manifest
+                .option("hello", "pk.package_id")
+                .unwrap()
+                .as_deref(),
+            Some("hello;1.0;amd64;local")
+        );
+        assert!(NativeJournal::pending(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn epoch_version_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        journaled(dir.path(), NativeOp::Install, "2:1.0-3");
+        let pk = resolver(Some("hello;2:1.0-3;x86_64;local"));
+        assert_eq!(settle(dir.path(), &mut manifest, &pk).unwrap(), 1);
+        assert!(installed(&manifest).is_some());
+    }
+
+    #[test]
+    fn crash_before_install_drops_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        journaled(dir.path(), NativeOp::Install, "1.0");
+        assert_eq!(
+            settle(dir.path(), &mut manifest, &resolver(None)).unwrap(),
+            1
+        );
+        assert!(installed(&manifest).is_none());
+        assert!(NativeJournal::pending(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn other_version_is_not_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        journaled(dir.path(), NativeOp::Install, "1.0");
+        let pk = resolver(Some("hello;0.9;amd64;local"));
+        assert_eq!(settle(dir.path(), &mut manifest, &pk).unwrap(), 1);
+        assert!(installed(&manifest).is_none());
+        assert!(NativeJournal::pending(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn interrupted_remove_forgets_removed_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        let record = intent().record.unwrap();
+        manifest
+            .commit_install_with(
+                &record.app_record("hello").unwrap(),
+                &record.version_record(),
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+        journaled(dir.path(), NativeOp::Remove, "");
+        assert_eq!(
+            settle(dir.path(), &mut manifest, &resolver(None)).unwrap(),
+            1
+        );
+        assert!(installed(&manifest).is_none());
+    }
+
+    #[test]
+    fn remove_that_did_not_happen_keeps_the_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        let record = intent().record.unwrap();
+        manifest
+            .commit_install_with(
+                &record.app_record("hello").unwrap(),
+                &record.version_record(),
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+        journaled(dir.path(), NativeOp::Remove, "");
+        let pk = resolver(Some("hello;1.0;amd64;local"));
+        assert_eq!(settle(dir.path(), &mut manifest, &pk).unwrap(), 1);
+        assert!(installed(&manifest).is_some());
+        assert!(NativeJournal::pending(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unreachable_packagekit_keeps_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        journaled(dir.path(), NativeOp::Install, "1.0");
+        let pk = Resolver {
+            pkg: None,
+            fail: true,
+        };
+        assert_eq!(settle(dir.path(), &mut manifest, &pk).unwrap(), 0);
+        assert_eq!(NativeJournal::pending(dir.path()).unwrap().len(), 1);
+        assert!(installed(&manifest).is_none());
+    }
 
     fn intent() -> NativeIntent {
         NativeIntent {

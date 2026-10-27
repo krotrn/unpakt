@@ -519,3 +519,55 @@ fn refused_consent_keeps_the_download() {
     plan.native_consent = true;
     engine.install(plan).unwrap();
 }
+
+#[test]
+fn resolve_failure_after_install_is_settled_next_run() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().fail_resolve_once = true;
+    let deb = hello_deb(src.path(), None);
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    assert!(matches!(engine.install(plan), Err(Error::PackageKit(_))));
+    assert!(engine.list().unwrap().is_empty());
+    assert_eq!(journals(engine.layout()), 1);
+
+    let recovered = engine.recover().unwrap();
+    assert_eq!(recovered.native, 1);
+    assert_eq!(engine.get("hello").unwrap().0.backend, "packagekit");
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn pending_native_journal_does_not_block_other_installs() {
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    pk.0.lock().unwrap().fail_resolve_once = true;
+    let deb = hello_deb(src.path(), None);
+    let mut engine = native_engine(root.path(), &pk);
+    let plan = native_plan(&engine, &deb, true);
+    assert!(engine.install(plan).is_err());
+
+    let mut engine = Engine::new(Layout::under(root.path()), deb_host()).unwrap();
+    let tarball = common::build_tarball(
+        src.path(),
+        "tool-1.0.tar.gz",
+        common::Comp::Gz,
+        &[common::E::File("tool/tool", b"#!/bin/sh\n", 0o755)],
+    );
+    let plan = engine
+        .inspect(tarball.to_str().unwrap(), AddOpts::default())
+        .unwrap();
+    engine.install(plan).unwrap();
+    assert_eq!(journals(engine.layout()), 1);
+    let checks = engine.doctor();
+    let check = checks.iter().find(|c| c.name == "journal").unwrap();
+    assert!(!check.ok);
+    assert!(
+        check.detail.contains("system package operations"),
+        "{}",
+        check.detail
+    );
+}

@@ -21,7 +21,7 @@ flate2 = "1.1.10"
 futures-lite = "2.6.1"
 goblin = "0.10.7"
 hex = "0.4.3"
-liblzma = { version = "0.4.8", features = ["parallel"] }
+liblzma = { version = "0.4.9", features = ["parallel"] }
 percent-encoding = "2.3.2"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "json"] }

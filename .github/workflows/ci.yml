@@ -36,7 +36,7 @@ jobs:
           args: -color
 
       - name: Shell scripts (shellcheck)
-        run: shellcheck get.sh install.sh packaging/*/*.sh packaging/appimage/AppRun
+        run: shellcheck get.sh install.sh packaging/*/*.sh packaging/appimage/AppRun scripts/pk-e2e/*.sh
 
       - name: Script tests (release scripts, get.sh)
         run: python3 -m unittest discover -s scripts/tests -v
@@ -186,3 +186,35 @@ jobs:
           name: unpakt-x86_64-linux-musl
           path: target/x86_64-unknown-linux-musl/release/unpakt
           if-no-files-found: error
+
+  # The static CLI against each distro's real PackageKit daemon. Containers have
+  # no systemd; run.sh starts the system bus and lets D-Bus start packagekitd.
+  packagekit:
+    name: Native installs on ${{ matrix.image }}
+    needs: musl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:24.04
+            family: ubuntu
+          - image: fedora:latest
+            family: fedora
+          - image: archlinux:latest
+            family: arch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download binary
+        uses: actions/download-artifact@v8
+        with:
+          name: unpakt-x86_64-linux-musl
+
+      - name: Native install checks
+        run: |
+          chmod +x ./unpakt
+          bash scripts/pk-e2e/run.sh "${{ matrix.family }}" ./unpakt

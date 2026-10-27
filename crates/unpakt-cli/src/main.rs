@@ -245,6 +245,7 @@ fn run(command: Command) -> Result<()> {
                 pattern,
                 format,
                 allow_risky,
+                extract: false,
             };
             let plan = engine.inspect(&input, opts)?;
             output::print_summary(&plan);

@@ -17,6 +17,7 @@ pub struct FakeState {
     pub fail_install: Option<fn() -> Error>,
     pub fail_remove: Option<fn() -> Error>,
     pub fail_resolve_once: bool,
+    pub panic_on_probe: bool,
 }
 
 #[derive(Clone, Default)]
@@ -44,7 +45,9 @@ impl FakePk {
 
 impl PackageKit for FakePk {
     fn can_install_files(&self) -> bool {
-        self.0.lock().unwrap().can_install
+        let state = self.0.lock().unwrap();
+        assert!(!state.panic_on_probe, "PackageKit was probed");
+        state.can_install
     }
 
     fn resolve_installed(&self, name: &str) -> Result<Option<PkPackage>> {

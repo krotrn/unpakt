@@ -102,6 +102,54 @@ pub struct AddOpts {
     pub format: Option<FormatKind>,
     /// Installs a package judged risky anyway.
     pub allow_risky: bool,
+    /// Installs into the user directory even when the system package manager
+    /// could install it.
+    pub extract: bool,
+}
+
+/// The backend id of apps installed through the system package manager.
+pub const NATIVE_BACKEND: &str = "packagekit";
+
+/// How a package will be installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// System-wide, through PackageKit.
+    Native,
+    /// Into the user directory.
+    Extract,
+    /// Not installable here.
+    Refused,
+}
+
+/// What a person must agree to before a native install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeConsent {
+    pub name: String,
+    pub version: String,
+    pub scripts: Vec<String>,
+    pub verdict: Option<Verdict>,
+}
+
+impl NativeConsent {
+    pub fn message(&self) -> String {
+        let mut out = format!(
+            "This installs {} {} system-wide with your package manager. Its install scripts will run as root.\n",
+            self.name, self.version
+        );
+        if self.scripts.is_empty() {
+            out.push_str("It has no install scripts.");
+        } else {
+            out.push_str(&format!("Scripts: {}", self.scripts.join(", ")));
+        }
+        if let Some(verdict) = &self.verdict {
+            out.push_str(&format!("\nCompatibility: {}", verdict.label()));
+            for finding in verdict.findings() {
+                let prefix = if finding.note { "note:" } else { "-" };
+                out.push_str(&format!("\n  {prefix} {}", finding.detail));
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +166,11 @@ pub struct InstallPlan {
     /// The host's own package manager command for the same file, when the
     /// package is of the host's family.
     pub native_hint: Option<String>,
+    /// Why a package of the host's family is not installed natively; `None`
+    /// when it is, or when extracting was asked for.
+    pub native_skipped: Option<String>,
+    /// Whether the person agreed to a native install; front-ends set it.
+    pub native_consent: bool,
     /// Another asset of the release that would install without these problems.
     pub alternative: Option<Alternative>,
 }
@@ -133,6 +186,9 @@ pub struct Alternative {
 impl InstallPlan {
     /// Why this plan must not be installed, or `None` when it may proceed.
     pub fn blocked(&self) -> Option<String> {
+        if self.backend == NATIVE_BACKEND {
+            return None;
+        }
         let name = &self.plan.name;
         let mut message = match &self.compat {
             Some(Verdict::NeedsContainer(_)) => format!(
@@ -150,6 +206,32 @@ impl InstallPlan {
             }
         }
         Some(message)
+    }
+
+    /// How this plan will be installed; `None` for anything but a package.
+    pub fn route(&self) -> Option<Route> {
+        self.plan.payload.package.as_ref()?;
+        Some(if self.backend == NATIVE_BACKEND {
+            Route::Native
+        } else if self.blocked().is_some() {
+            Route::Refused
+        } else {
+            Route::Extract
+        })
+    }
+
+    /// The agreement to ask for; `Some` only on the native route.
+    pub fn consent(&self) -> Option<NativeConsent> {
+        if self.route()? != Route::Native {
+            return None;
+        }
+        let meta = self.plan.payload.package.as_ref()?;
+        Some(NativeConsent {
+            name: meta.name.clone(),
+            version: meta.version.clone(),
+            scripts: meta.scripts.iter().map(|s| s.name.clone()).collect(),
+            verdict: self.compat.clone(),
+        })
     }
 
     /// The error to refuse this plan with: a risky plan can still be accepted,
@@ -179,9 +261,7 @@ pub struct Engine {
     cancel: Cancel,
     progress: ProgressFn,
     host_libs: std::cell::OnceCell<crate::compat::HostLibs>,
-    #[expect(dead_code, reason = "read by the native install route")]
     packagekit: Box<dyn PackageKit>,
-    #[expect(dead_code, reason = "read by the native install route")]
     pk_ready: std::cell::OnceCell<bool>,
 }
 
@@ -387,7 +467,6 @@ impl Engine {
     }
 
     /// Whether PackageKit can install local files; asked once.
-    #[expect(dead_code, reason = "called by the native install route")]
     pub(crate) fn packagekit_ready(&self) -> bool {
         *self
             .pk_ready
@@ -733,6 +812,20 @@ impl Engine {
                 SourceKind::LocalFile => native_install_hint(meta.family, &canonical),
                 _ => native_download_hint(meta.family, &asset.url, &asset.name),
             });
+        let same_family = payload
+            .package
+            .as_ref()
+            .is_some_and(|meta| Some(meta.family) == self.host.family());
+        let native =
+            same_family && !opts.extract && !self.host.immutable_root && self.packagekit_ready();
+        let native_skipped = (same_family && !native && !opts.extract).then(|| {
+            if self.host.immutable_root {
+                "the system is image-based".to_string()
+            } else {
+                "PackageKit is not available".to_string()
+            }
+        });
+        let native_hint = if native { None } else { native_hint };
         let alternative = if payload.package.is_some() {
             [FormatKind::AppImage, FormatKind::Tarball]
                 .into_iter()
@@ -762,12 +855,14 @@ impl Engine {
             plan,
             source,
             marker: release.marker,
-            backend: backend.id(),
+            backend: if native { NATIVE_BACKEND } else { backend.id() },
             want_desktop,
             command,
             opts,
             compat,
             native_hint,
+            native_skipped,
+            native_consent: false,
             alternative,
         })
     }
@@ -982,6 +1077,7 @@ impl Engine {
             pattern,
             format: Some(app.format),
             allow_risky: false,
+            extract: false,
         };
         let mut p = self.inspect(&app.source.location, opts)?;
         let _download = self.download_guard(&p.plan.artifact.path);

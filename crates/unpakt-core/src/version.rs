@@ -16,6 +16,95 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
     compare(candidate, current) == Ordering::Greater
 }
 
+/// Compares two deb, rpm or pacman versions, `[epoch:]upstream[-revision]`.
+/// The epoch compares numerically (missing is 0), then the upstream part and
+/// the revision (missing is empty) compare segment by segment: `~` sorts
+/// before everything, even the end of the string, digit runs compare
+/// numerically, a digit run is newer than a letter run, and other characters
+/// only separate segments.
+pub fn compare_package(a: &str, b: &str) -> Ordering {
+    let (epoch_a, rest_a) = split_epoch(a);
+    let (epoch_b, rest_b) = split_epoch(b);
+    let (upstream_a, revision_a) = rest_a.rsplit_once('-').unwrap_or((rest_a, ""));
+    let (upstream_b, revision_b) = rest_b.rsplit_once('-').unwrap_or((rest_b, ""));
+    compare_numeric(epoch_a, epoch_b)
+        .then_with(|| compare_segments(upstream_a, upstream_b))
+        .then_with(|| compare_segments(revision_a, revision_b))
+}
+
+/// The digits before the first `:` and the rest; no epoch is `"0"`.
+fn split_epoch(v: &str) -> (&str, &str) {
+    match v.split_once(':') {
+        Some((epoch, rest)) if is_digits(epoch) => (epoch, rest),
+        _ => ("0", v),
+    }
+}
+
+fn compare_segments(a: &str, b: &str) -> Ordering {
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    loop {
+        a = skip_separators(a);
+        b = skip_separators(b);
+        match (a.first() == Some(&b'~'), b.first() == Some(&b'~')) {
+            (true, true) => {
+                a = &a[1..];
+                b = &b[1..];
+                continue;
+            }
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (false, false) => {}
+        }
+        let (Some(&x), Some(&y)) = (a.first(), b.first()) else {
+            return a.len().cmp(&b.len());
+        };
+        let numeric = x.is_ascii_digit();
+        if numeric != y.is_ascii_digit() {
+            return if numeric {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
+        let (run_a, tail_a) = take_run(a, numeric);
+        let (run_b, tail_b) = take_run(b, numeric);
+        let ord = if numeric {
+            compare_numeric(run_a, run_b)
+        } else {
+            run_a.cmp(run_b)
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+        a = tail_a;
+        b = tail_b;
+    }
+}
+
+fn skip_separators(s: &[u8]) -> &[u8] {
+    let start = s
+        .iter()
+        .position(|b| b.is_ascii_alphanumeric() || *b == b'~')
+        .unwrap_or(s.len());
+    &s[start..]
+}
+
+/// The leading run of digits (or of letters) and what follows it.
+fn take_run(s: &[u8], numeric: bool) -> (&str, &[u8]) {
+    let end = s
+        .iter()
+        .position(|b| {
+            if numeric {
+                !b.is_ascii_digit()
+            } else {
+                !b.is_ascii_alphabetic()
+            }
+        })
+        .unwrap_or(s.len());
+    // Runs are ASCII, so the slice is valid UTF-8.
+    (std::str::from_utf8(&s[..end]).unwrap_or(""), &s[end..])
+}
+
 fn strip_tag(tag: &str) -> &str {
     let tag = tag.strip_prefix("release-").unwrap_or(tag);
     tag.strip_prefix(['v', 'V']).unwrap_or(tag)
@@ -115,6 +204,52 @@ mod tests {
         for a in inputs {
             for b in inputs {
                 assert_eq!(compare(a, b), compare(b, a).reverse(), "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn package_versions_compare() {
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(compare_package("1.2.10-1", "1.2.9-1"), Greater);
+        assert_eq!(compare_package("1.2.3-1", "1.2.3-1"), Equal);
+        assert_eq!(compare_package("1.2.3-2", "1.2.3-1"), Greater);
+        assert_eq!(compare_package("1:1.0-1", "2.0-1"), Greater);
+        assert_eq!(compare_package("0:1.0-1", "1.0-1"), Equal);
+        assert_eq!(compare_package("1.0~rc1-1", "1.0-1"), Less);
+        assert_eq!(compare_package("1.0-1.fc40", "1.0-1.fc40"), Equal);
+        assert_eq!(compare_package("1.0a", "1.0"), Greater);
+        assert_eq!(compare_package("1.0.1", "1.0a"), Greater);
+    }
+
+    #[test]
+    fn package_compare_is_antisymmetric_and_never_panics() {
+        let inputs = [
+            "",
+            "v",
+            "release-",
+            "1..2",
+            "99999999999999999999.0.0",
+            "1.0.0",
+            "1.0.0-rc1",
+            "1.0.0+build",
+            "nightly",
+            "2024.10.01",
+            "v1.10.0",
+            "1:",
+            ":1",
+            "1.0~",
+            "~",
+            "2:1.0-3",
+            "é-ü",
+        ];
+        for a in inputs {
+            for b in inputs {
+                assert_eq!(
+                    compare_package(a, b),
+                    compare_package(b, a).reverse(),
+                    "{a:?} vs {b:?}"
+                );
             }
         }
     }

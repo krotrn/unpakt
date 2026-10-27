@@ -2,7 +2,8 @@ mod common;
 
 use common::{
     Comp, E, RpmTags, build_appimage, build_ar, build_deb, build_elf, build_pacman, build_rpm,
-    build_rpm_with, build_tarball, electron_like_with, host_package_arch, host_rpm_arch,
+    build_rpm_full, build_rpm_with, build_tarball, electron_like_with, host_package_arch,
+    host_rpm_arch,
 };
 use std::path::Path;
 use unpakt_core::Error;
@@ -609,6 +610,14 @@ fn deb_script_entry_keeps_text() {
     assert!(meta.entry_script.unwrap().contains("exec /opt/Foo/foo"));
 }
 
+fn rpm_tags_v<'a>(version: &'a str, release: &'a str) -> RpmTags<'a> {
+    RpmTags {
+        version,
+        release,
+        ..rpm_tags("noarch")
+    }
+}
+
 fn rpm_tags(arch: &str) -> RpmTags<'_> {
     RpmTags {
         name: "foo",
@@ -684,6 +693,31 @@ fn rpm_reads_trigger_scripts() {
     let names: Vec<&str> = meta.scripts.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["%trigger", "%filetrigger", "%transfiletrigger"]);
     assert_eq!(meta.scripts[0].text, "useradd evil");
+}
+
+#[test]
+fn epoch_is_part_of_the_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elf = build_elf(&[], None, &[], &[]);
+    let data = [E::File("opt/foo/foo", &elf, 0o755)];
+    let version = |ints: &[(u32, u32, u32)]| {
+        let path = build_rpm_full(
+            tmp.path(),
+            "a.rpm",
+            rpm_tags_v("1.0", "3"),
+            &data,
+            &[],
+            ints,
+        );
+        inspect(&path).map(|p| p.version)
+    };
+    assert_eq!(
+        version(&[(1003, 2, 1)]).unwrap().as_deref(),
+        Some("2:1.0-3")
+    );
+    assert_eq!(version(&[(1003, 0, 1)]).unwrap().as_deref(), Some("1.0-3"));
+    assert_eq!(version(&[]).unwrap().as_deref(), Some("1.0-3"));
+    assert!(matches!(version(&[(1003, 2, 9)]), Err(Error::Parse(_))));
 }
 
 #[test]

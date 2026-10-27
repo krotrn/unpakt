@@ -18,6 +18,7 @@ const MAX_STORE_BYTES: u32 = 64 * 1024 * 1024;
 const TAG_NAME: u32 = 1000;
 const TAG_VERSION: u32 = 1001;
 const TAG_RELEASE: u32 = 1002;
+const TAG_EPOCH: u32 = 1003;
 const TAG_ARCH: u32 = 1022;
 const TAG_SOURCERPM: u32 = 1044;
 const TAG_REQUIRENAME: u32 = 1049;
@@ -38,6 +39,7 @@ const TRIGGER_TAGS: [(u32, &str); 3] = [
 ];
 const MAX_TRIGGERS: usize = 64;
 
+const TYPE_INT32: u32 = 4;
 const TYPE_STRING: u32 = 6;
 const TYPE_STRING_ARRAY: u32 = 8;
 const TYPE_I18N_STRING: u32 = 9;
@@ -84,11 +86,16 @@ impl FormatPlugin for Rpm {
             return Err(source_rpm());
         }
         let name = one(TAG_NAME, "name")?;
-        let version = format!(
+        let vr = format!(
             "{}-{}",
             one(TAG_VERSION, "version")?,
             one(TAG_RELEASE, "release")?
         );
+        // PackageKit reports the epoch ahead of the version once it is above 0.
+        let version = match main.int32(TAG_EPOCH)? {
+            Some(epoch) if epoch > 0 => format!("{epoch}:{vr}"),
+            _ => vr,
+        };
         let arch = one(TAG_ARCH, "arch")?;
         let depends = main
             .strings(TAG_REQUIRENAME, usize::MAX)
@@ -208,6 +215,24 @@ fn read_header(file: &mut File, path: &Path) -> Result<RpmHeader> {
 impl RpmHeader {
     fn find(&self, tag: u32) -> Option<&Entry> {
         self.entries.iter().find(|e| e.tag == tag)
+    }
+
+    /// The first value of an INT32 tag; `None` when the tag is absent.
+    fn int32(&self, tag: u32) -> Result<Option<u32>> {
+        let Some(e) = self.find(tag) else {
+            return Ok(None);
+        };
+        if e.kind != TYPE_INT32 || e.count == 0 {
+            return Err(Error::Parse(format!("rpm tag {tag} is not an integer")));
+        }
+        let bad = || Error::Parse(format!("rpm tag {tag} runs past its store"));
+        let start = e.offset as usize;
+        let end = (e.count as usize)
+            .checked_mul(4)
+            .and_then(|len| start.checked_add(len))
+            .ok_or_else(bad)?;
+        let bytes = self.store.get(start..end).ok_or_else(bad)?;
+        Ok(Some(be32(bytes)))
     }
 
     /// Up to `limit` strings of a string, string-array or i18n-string tag;

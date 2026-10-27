@@ -252,6 +252,11 @@ fn rpm_header(tags: &[(u32, u32, Vec<u8>, u32)], signature: bool) -> Vec<u8> {
     let mut index = Vec::new();
     let mut store = Vec::new();
     for (tag, kind, bytes, count) in tags {
+        if *kind == 4 {
+            while store.len() % 4 != 0 {
+                store.push(0);
+            }
+        }
         index.extend_from_slice(&tag.to_be_bytes());
         index.extend_from_slice(&kind.to_be_bytes());
         index.extend_from_slice(&(store.len() as u32).to_be_bytes());
@@ -350,6 +355,20 @@ pub fn build_rpm_with(
     data: &[E],
     extra: &[(u32, &str)],
 ) -> PathBuf {
+    build_rpm_full(dir, name, t, data, extra, &[])
+}
+
+/// Like [`build_rpm_with`], with INT32 tags `(tag, value, declared count)`.
+/// Each tag stores one value; a count above 1 makes the entry run past the
+/// end of the store when it is the last one.
+pub fn build_rpm_full(
+    dir: &Path,
+    name: &str,
+    t: RpmTags,
+    data: &[E],
+    extra: &[(u32, &str)],
+    ints: &[(u32, u32, u32)],
+) -> PathBuf {
     let string = |tag: u32, v: &str| (tag, 6, [v.as_bytes(), &[0]].concat(), 1);
     let mut tags = vec![
         string(1000, t.name),
@@ -362,6 +381,9 @@ pub fn build_rpm_with(
     }
     for (tag, value) in extra {
         tags.push(string(*tag, value));
+    }
+    for (tag, value, count) in ints {
+        tags.push((*tag, 4, value.to_be_bytes().to_vec(), *count));
     }
     if !t.source {
         tags.push(string(1044, "foo-1.2.3-1.src.rpm"));

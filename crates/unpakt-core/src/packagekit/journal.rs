@@ -5,7 +5,6 @@
 //! means the process died, or the answer was lost, between the system change
 //! and the manifest commit; whoever opens the manifest next settles it.
 
-use crate::engine::KEEP_VERSIONS;
 use crate::error::{Error, IoResultExt, Result};
 use crate::lock::WriteLock;
 use crate::manifest::{AppRecord, Manifest, VersionRecord};
@@ -213,19 +212,7 @@ fn record_landed(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     stored.push(("pk.package_id", package_id));
-    let pruned: Vec<String> = if intent.op == NativeOp::Update {
-        manifest
-            .versions(&intent.app)?
-            .into_iter()
-            .skip(KEEP_VERSIONS - 1)
-            .filter(|v| v.label != record.label)
-            .map(|v| v.label)
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let pruned: Vec<&str> = pruned.iter().map(String::as_str).collect();
-    manifest.commit_install_with(&app, &version, &[], &stored, &pruned)
+    manifest.commit_native_version(&app, &version, &stored)
 }
 
 #[cfg(test)]
@@ -418,6 +405,30 @@ mod tests {
                 options: vec![("pk.name".into(), "hello".into())],
             }),
         }
+    }
+
+    #[test]
+    fn landed_label_that_already_has_a_row_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manifest = Manifest::open_in_memory().unwrap();
+        for (op, version) in [
+            (NativeOp::Install, "1.0"),
+            (NativeOp::Update, "2.0"),
+            (NativeOp::Update, "1.0"),
+        ] {
+            let mut intent = intent();
+            intent.op = op;
+            intent.version = version.into();
+            let record = intent.record.as_mut().unwrap();
+            record.label = version.into();
+            record.version = Some(version.into());
+            NativeJournal::create(dir.path(), &intent).unwrap();
+            let pk = resolver(Some(&format!("hello;{version};amd64;local")));
+            assert_eq!(settle(dir.path(), &mut manifest, &pk).unwrap(), 1);
+        }
+        assert_eq!(installed(&manifest).unwrap().current, "1.0");
+        assert_eq!(manifest.versions("hello").unwrap().len(), 2);
+        assert!(NativeJournal::pending(dir.path()).unwrap().is_empty());
     }
 
     #[test]

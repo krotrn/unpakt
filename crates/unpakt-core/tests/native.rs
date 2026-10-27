@@ -763,6 +763,27 @@ fn forge_hello(root: &Path, pk: &FakePk, forge: &common::MockForge) -> Engine {
     engine
 }
 
+/// No native journal and no download left behind.
+fn assert_clean(engine: &Engine) {
+    assert_eq!(journals(engine.layout()), 0);
+    let downloads = engine.layout().cache.join("downloads");
+    let left = std::fs::read_dir(&downloads)
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(left, 0, "downloads left in {}", downloads.display());
+}
+
+fn update_yes(engine: &mut Engine) -> unpakt_core::Result<Option<String>> {
+    let mut confirm = |_: &unpakt_core::engine::NativeConsent| true;
+    engine.update_opts(
+        "hello",
+        UpdateOpts {
+            allow_risky: false,
+            confirm_native: Some(&mut confirm),
+        },
+    )
+}
+
 fn current_version(engine: &Engine) -> Option<String> {
     let (app, versions, _) = engine.get("hello").unwrap();
     versions
@@ -829,6 +850,7 @@ fn native_update_without_confirm_needs_consent() {
     ));
     assert_eq!(current_version(&engine).as_deref(), Some("1.0"));
     assert_eq!(installs(&pk), 1);
+    assert_clean(&engine);
 }
 
 #[test]
@@ -851,6 +873,7 @@ fn native_update_declined_keeps_current() {
     }
     assert_eq!(current_version(&engine).as_deref(), Some("1.0"));
     assert_eq!(installs(&pk), 1);
+    assert_clean(&engine);
 }
 
 #[test]
@@ -923,6 +946,7 @@ fn native_package_gone_is_not_reinstalled() {
         other => panic!("{other:?}"),
     }
     assert_eq!(installs(&pk), 1);
+    assert_clean(&engine);
 }
 
 #[test]
@@ -938,6 +962,8 @@ fn native_update_without_packagekit_keeps_current() {
         other => panic!("{other:?}"),
     }
     assert_eq!(current_version(&engine).as_deref(), Some("1.0"));
+    assert_eq!(installs(&pk), 1);
+    assert_clean(&engine);
 }
 
 #[test]
@@ -1007,4 +1033,93 @@ fn interrupted_native_update_is_recorded_on_next_run() {
     assert_eq!(app.current, "4.0");
     assert_eq!(versions.len(), unpakt_core::engine::KEEP_VERSIONS);
     assert!(versions.iter().all(|v| v.label != "1.0"));
+}
+
+#[test]
+fn system_version_matching_an_old_row_becomes_current() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    pk.0.lock().unwrap().next_install = PkPackage::parse("hello;2.0;amd64;local");
+    update_yes(&mut engine).unwrap();
+    assert_eq!(engine.get("hello").unwrap().1.len(), 2);
+
+    // The system went back to 1.0 behind unpakt's back.
+    publish_hello(&forge, "v3.0", "1.0");
+    pk.0.lock().unwrap().installed.insert(
+        "hello".into(),
+        PkPackage::parse("hello;1.0;amd64;local").unwrap(),
+    );
+    assert_eq!(update_yes(&mut engine).unwrap(), None);
+    let (app, versions, _) = engine.get("hello").unwrap();
+    assert_eq!(app.current, "1.0");
+    assert_eq!(versions.len(), 2);
+    assert_eq!(installs(&pk), 2);
+    assert_clean(&engine);
+}
+
+#[test]
+fn update_to_a_previously_installed_label_commits() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    // The system package manager moves hello ahead twice; each is recorded
+    // under the system's own version label.
+    for (tag, sys) in [("v2.0", "2.5"), ("v2.1", "2.6")] {
+        publish_hello(&forge, tag, "2.0");
+        pk.0.lock().unwrap().installed.insert(
+            "hello".into(),
+            PkPackage::parse(&format!("hello;{sys};amd64;local")).unwrap(),
+        );
+        assert_eq!(update_yes(&mut engine).unwrap(), None);
+    }
+    assert_eq!(engine.get("hello").unwrap().1.len(), 3);
+
+    // A release tagged like an old row, carrying a newer package.
+    publish_hello(&forge, "v2.5", "3.0");
+    pk.0.lock().unwrap().next_install = PkPackage::parse("hello;3.0;amd64;local");
+    assert_eq!(update_yes(&mut engine).unwrap().as_deref(), Some("2.5"));
+    let (app, versions, _) = engine.get("hello").unwrap();
+    assert_eq!(app.current, "2.5");
+    assert_eq!(versions.len(), 3);
+    assert_eq!(current_version(&engine).as_deref(), Some("3.0"));
+    assert_clean(&engine);
+}
+
+#[test]
+fn native_updates_past_the_keep_limit_prune_old_versions() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    for version in ["2.0", "3.0", "4.0"] {
+        publish_hello(&forge, &format!("v{version}"), version);
+        pk.0.lock().unwrap().next_install =
+            PkPackage::parse(&format!("hello;{version};amd64;local"));
+        update_yes(&mut engine).unwrap();
+    }
+    let (app, versions, _) = engine.get("hello").unwrap();
+    assert_eq!(app.current, "4.0");
+    let labels: Vec<_> = versions.iter().map(|v| v.label.as_str()).collect();
+    assert_eq!(labels, ["4.0", "3.0", "2.0"]);
+    assert_clean(&engine);
+}
+
+#[test]
+fn native_update_refreshes_the_package_name() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    pk.0.lock().unwrap().next_install = PkPackage::parse("hello;2.0;amd64;local");
+    update_yes(&mut engine).unwrap();
+    let manifest = Manifest::open(&Layout::under(root.path()).db).unwrap();
+    assert_eq!(
+        manifest.option("hello", "pk.name").unwrap().as_deref(),
+        Some("hello")
+    );
 }

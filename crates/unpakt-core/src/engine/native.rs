@@ -73,7 +73,7 @@ impl Engine {
             entry: native_entry(&p.plan.payload, p.plan.entry.as_ref()),
             options,
         };
-        self.apply_native(NativeOp::Install, &id, &artifact, &consent, record, &[])
+        self.apply_native(NativeOp::Install, &id, &artifact, &consent, record)
     }
 
     /// Journals the change, has PackageKit install `artifact`, then records
@@ -86,7 +86,6 @@ impl Engine {
         artifact: &Path,
         consent: &NativeConsent,
         record: NativeRecord,
-        pruned: &[&str],
     ) -> Result<AppRecord> {
         let journal = NativeJournal::create(
             &self.layout.data.join("native"),
@@ -139,7 +138,7 @@ impl Engine {
             .collect();
         stored.push(("pk.package_id", &installed.id));
         self.manifest
-            .commit_install_with(&app, &version, &[], &stored, pruned)?;
+            .commit_native_version(&app, &version, &stored)?;
         journal.finish()?;
         Ok(app)
     }
@@ -184,15 +183,8 @@ impl Engine {
         }
         // The release that was just fetched may differ from the one checked
         // above, so the downgrade guard applies to what is about to be installed.
-        if app.source.kind == SourceKind::Github {
-            let fetched = Release {
-                version: p.marker.clone(),
-                marker: p.marker.clone(),
-                assets: Vec::new(),
-            };
-            if newer_release(app, current, &fetched).is_none() {
-                return Ok(None);
-            }
+        if fetched_is_downgrade(app, current, p.marker.as_deref()) {
+            return Ok(None);
         }
         let consent = p
             .consent()
@@ -227,12 +219,10 @@ impl Engine {
                 exec_kind: current.exec_kind,
                 installed_at: now(),
             };
-            self.manifest.commit_install_with(
+            self.manifest.commit_native_version(
                 &record,
                 &version,
-                &[],
                 &[("pk.package_id", &installed.id)],
-                &[],
             )?;
             return Ok(None);
         }
@@ -249,15 +239,7 @@ impl Engine {
         }
 
         let artifact = std::fs::canonicalize(&p.plan.artifact.path).at(&p.plan.artifact.path)?;
-        let locked = self.lock_unchanged(app)?;
-        // `versions` is newest first; the new version takes the first slot.
-        let pruned: Vec<&str> = locked
-            .versions
-            .iter()
-            .skip(KEEP_VERSIONS - 1)
-            .filter(|v| v.label != label)
-            .map(|v| v.label.as_str())
-            .collect();
+        let _locked = self.lock_unchanged(app)?;
         let record = NativeRecord {
             name: p.plan.name.clone(),
             format: app.format.as_str().into(),
@@ -268,9 +250,9 @@ impl Engine {
             version: p.plan.payload.version.clone(),
             marker: p.marker.clone(),
             entry: native_entry(&p.plan.payload, p.plan.entry.as_ref()),
-            options: Vec::new(),
+            options: vec![("pk.name".into(), consent.name.clone())],
         };
-        self.apply_native(NativeOp::Update, id, &artifact, &consent, record, &pruned)?;
+        self.apply_native(NativeOp::Update, id, &artifact, &consent, record)?;
         Ok(Some(label))
     }
 

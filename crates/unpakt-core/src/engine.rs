@@ -334,6 +334,20 @@ fn newer_release(
     })
 }
 
+/// Whether the GitHub release just fetched, tagged `marker`, is no newer than
+/// the installed version. Other sources are never downgrades.
+fn fetched_is_downgrade(app: &AppRecord, current: &VersionRecord, marker: Option<&str>) -> bool {
+    if app.source.kind != SourceKind::Github {
+        return false;
+    }
+    let fetched = Release {
+        version: marker.map(String::from),
+        marker: marker.map(String::from),
+        assets: Vec::new(),
+    };
+    newer_release(app, current, &fetched).is_none()
+}
+
 /// The command name an app is known by: the binary the package itself runs,
 /// falling back to the app id when that is unknown or unusable.
 fn default_command(id: &str, entry: Option<&EntryCandidate>, payload: &Payload) -> String {
@@ -1158,15 +1172,8 @@ impl Engine {
         }
         // The release that was just fetched may differ from the one checked
         // above, so the downgrade guard applies to what is about to be installed.
-        if app.source.kind == SourceKind::Github {
-            let fetched = Release {
-                version: p.marker.clone(),
-                marker: p.marker.clone(),
-                assets: Vec::new(),
-            };
-            if newer_release(&app, &current, &fetched).is_none() {
-                return Ok(None);
-            }
+        if fetched_is_downgrade(&app, &current, p.marker.as_deref()) {
+            return Ok(None);
         }
         let mut accepted_tags: Option<std::collections::BTreeSet<String>> = None;
         match &p.compat {

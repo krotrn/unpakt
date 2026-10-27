@@ -289,6 +289,81 @@ impl Manifest {
         Ok(())
     }
 
+    /// Records a system-wide version in one transaction: the app row, the
+    /// version (replacing any row with the same label), the options, and the
+    /// removal of versions beyond `KEEP_VERSIONS`, never the new one.
+    pub fn commit_native_version(
+        &mut self,
+        app: &AppRecord,
+        ver: &VersionRecord,
+        options: &[(&str, &str)],
+    ) -> Result<()> {
+        let ts = now();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO apps (id, name, format, backend, source_kind, source_location, \
+                 source_pattern, current, desktop, command, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11) \
+             ON CONFLICT(id) DO UPDATE SET \
+                 name = excluded.name, format = excluded.format, backend = excluded.backend, \
+                 source_kind = excluded.source_kind, source_location = excluded.source_location, \
+                 source_pattern = excluded.source_pattern, current = excluded.current, \
+                 desktop = excluded.desktop, command = excluded.command, \
+                 updated_at = excluded.updated_at",
+            params![
+                app.id,
+                app.name,
+                app.format.as_str(),
+                app.backend,
+                app.source.kind.as_str(),
+                app.source.location,
+                app.source.pattern,
+                ver.label,
+                app.desktop,
+                app.command,
+                ts,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM versions WHERE app_id = ?1 AND label = ?2",
+            params![app.id, ver.label],
+        )?;
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM versions WHERE app_id = ?1",
+            [&app.id],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO versions \
+                 (app_id, label, version, marker, entry, exec_kind, seq, installed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                app.id,
+                ver.label,
+                ver.version,
+                ver.marker,
+                path_text(&ver.entry)?,
+                ver.exec_kind.as_str(),
+                seq,
+                ver.installed_at,
+            ],
+        )?;
+        for (key, value) in options {
+            tx.execute(
+                "INSERT INTO options (app_id, key, value) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(app_id, key) DO UPDATE SET value = excluded.value",
+                params![app.id, key, value],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM versions WHERE app_id = ?1 AND label <> ?2 AND seq NOT IN \
+                 (SELECT seq FROM versions WHERE app_id = ?1 ORDER BY seq DESC LIMIT ?3)",
+            params![app.id, ver.label, crate::engine::KEEP_VERSIONS as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<AppRecord>> {
         Ok(self
             .conn

@@ -64,30 +64,33 @@ fn gz_tar(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
 /// A deb whose postinst creates an account, which the compatibility check
 /// reports as risky.
 fn risky_deb(dir: &Path) -> PathBuf {
+    test_deb(dir, "riskyfoo", Some(b"#!/bin/sh\nuseradd riskyfoo\n"))
+}
+
+/// A deb named `name` holding one shell entry, with an optional postinst.
+fn test_deb(dir: &Path, name: &str, postinst: Option<&[u8]>) -> PathBuf {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         other => other,
     };
     let control = format!(
-        "Package: riskyfoo\nVersion: 1.0\nArchitecture: {arch}\nMaintainer: t <t@example.org>\n"
+        "Package: {name}\nVersion: 1.0\nArchitecture: {arch}\nMaintainer: t <t@example.org>\n"
     );
+    let mut control_tar = vec![("control", control.as_bytes(), 0o644)];
+    if let Some(script) = postinst {
+        control_tar.push(("postinst", script, 0o755));
+    }
+    let entry = format!("opt/{name}/{name}");
     let mut bytes = b"!<arch>\n".to_vec();
     ar_member(&mut bytes, "debian-binary", b"2.0\n");
-    ar_member(
-        &mut bytes,
-        "control.tar.gz",
-        &gz_tar(&[
-            ("control", control.as_bytes(), 0o644),
-            ("postinst", b"#!/bin/sh\nuseradd riskyfoo\n", 0o755),
-        ]),
-    );
+    ar_member(&mut bytes, "control.tar.gz", &gz_tar(&control_tar));
     ar_member(
         &mut bytes,
         "data.tar.gz",
-        &gz_tar(&[("opt/riskyfoo/riskyfoo", b"#!/bin/sh\necho hi\n", 0o755)]),
+        &gz_tar(&[(entry.as_str(), b"#!/bin/sh\necho hi\n", 0o755)]),
     );
-    let path = dir.join("riskyfoo_1.0_pkg.deb");
+    let path = dir.join(format!("{name}_1.0_pkg.deb"));
     std::fs::write(&path, bytes).unwrap();
     path
 }
@@ -749,8 +752,10 @@ fn same_family_deb_without_packagekit_says_why() {
     if Host::detect().family() != Some(PackageFamily::Deb) {
         return;
     }
+    // A package with no install scripts: with PackageKit it would install
+    // system-wide, so the extract route has to name why it was skipped.
     let tmp = tempfile::tempdir().unwrap();
-    let deb = risky_deb(tmp.path());
+    let deb = test_deb(tmp.path(), "plainfoo", None);
     let out = run(tmp.path(), &["inspect", deb.to_str().unwrap()]);
     assert!(
         stdout(&out).contains("(PackageKit is not available)"),

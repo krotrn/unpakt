@@ -73,11 +73,26 @@ impl Engine {
             entry: native_entry(&p.plan.payload, p.plan.entry.as_ref()),
             options,
         };
+        self.apply_native(NativeOp::Install, &id, &artifact, &consent, record, &[])
+    }
+
+    /// Journals the change, has PackageKit install `artifact`, then records
+    /// what landed. The journal stays unless nothing was changed, so a later
+    /// run can settle an answer that was lost.
+    fn apply_native(
+        &mut self,
+        op: NativeOp,
+        id: &str,
+        artifact: &Path,
+        consent: &NativeConsent,
+        record: NativeRecord,
+        pruned: &[&str],
+    ) -> Result<AppRecord> {
         let journal = NativeJournal::create(
             &self.layout.data.join("native"),
             &NativeIntent {
-                op: NativeOp::Install,
-                app: id.clone(),
+                op,
+                app: id.to_string(),
                 pk_name: consent.name.clone(),
                 version: consent.version.clone(),
                 record: Some(record.clone()),
@@ -87,7 +102,7 @@ impl Engine {
         self.emit(Progress::Installing);
         let result = self
             .packagekit
-            .install_file(&artifact, &self.cancel, &mut |event| {
+            .install_file(artifact, &self.cancel, &mut |event| {
                 self.emit(match event {
                     PkEvent::WaitingForAuth => Progress::WaitingForAuthorization,
                     PkEvent::Changing { percent } => Progress::SystemChange { percent },
@@ -115,7 +130,7 @@ impl Engine {
                     consent.name
                 ))
             })?;
-        let app = record.app_record(&id)?;
+        let app = record.app_record(id)?;
         let version = record.version_record();
         let mut stored: Vec<(&str, &str)> = record
             .options
@@ -124,9 +139,139 @@ impl Engine {
             .collect();
         stored.push(("pk.package_id", &installed.id));
         self.manifest
-            .commit_install_with(&app, &version, &[], &stored, &[])?;
+            .commit_install_with(&app, &version, &[], &stored, pruned)?;
         journal.finish()?;
         Ok(app)
+    }
+
+    /// Updates a system-wide app to the latest release, after the person
+    /// agrees. The package manager is the only route; a system package that is
+    /// already as new is recorded instead of reinstalled.
+    pub(super) fn update_native(
+        &mut self,
+        app: &AppRecord,
+        current: &VersionRecord,
+        opts: UpdateOpts<'_>,
+    ) -> Result<Option<String>> {
+        let id = app.id.as_str();
+        let release = for_kind(app.source.kind).latest(&app.source, &self.http)?;
+        if app.source.kind == SourceKind::Github && newer_release(app, current, &release).is_none()
+        {
+            return Ok(None);
+        }
+        let pattern = self
+            .manifest
+            .option(id, "pattern")?
+            .or_else(|| app.source.pattern.clone());
+        let add = AddOpts {
+            id: Some(id.to_string()),
+            format: Some(app.format),
+            pattern,
+            extract: false,
+            ..Default::default()
+        };
+        let p = self.inspect(&app.source.location, add)?;
+        if p.backend != NATIVE_BACKEND {
+            self.discard(p);
+            return Err(Error::PackageKitUnavailable(format!(
+                "{id} was installed with PackageKit, which is not available now; current version kept"
+            )));
+        }
+        let _download = self.download_guard(&p.plan.artifact.path);
+        let label = p.plan.label.clone();
+        if label == current.label {
+            return Ok(None);
+        }
+        // The release that was just fetched may differ from the one checked
+        // above, so the downgrade guard applies to what is about to be installed.
+        if app.source.kind == SourceKind::Github {
+            let fetched = Release {
+                version: p.marker.clone(),
+                marker: p.marker.clone(),
+                assets: Vec::new(),
+            };
+            if newer_release(app, current, &fetched).is_none() {
+                return Ok(None);
+            }
+        }
+        let consent = p
+            .consent()
+            .ok_or_else(|| Error::Unsupported("this package has no native install".into()))?;
+        let pk_name = self
+            .manifest
+            .option(id, "pk.name")?
+            .unwrap_or_else(|| consent.name.clone());
+        let installed = self.packagekit.resolve_installed(&pk_name)?;
+        let Some(installed) = installed else {
+            return Err(Error::NotFound(format!(
+                "{id} is no longer installed on the system; run `unpakt remove {id}` to forget it"
+            )));
+        };
+        if crate::version::compare_package(&consent.version, &installed.version)
+            != std::cmp::Ordering::Greater
+        {
+            let system_label = version_label(&installed.version);
+            if system_label == current.label {
+                return Ok(None);
+            }
+            let _locked = self.lock_unchanged(app)?;
+            let record = AppRecord {
+                current: system_label.clone(),
+                ..app.clone()
+            };
+            let version = VersionRecord {
+                label: system_label,
+                version: Some(installed.version.clone()),
+                marker: p.marker.clone(),
+                entry: current.entry.clone(),
+                exec_kind: current.exec_kind,
+                installed_at: now(),
+            };
+            self.manifest.commit_install_with(
+                &record,
+                &version,
+                &[],
+                &[("pk.package_id", &installed.id)],
+                &[],
+            )?;
+            return Ok(None);
+        }
+
+        match opts.confirm_native {
+            None => return Err(Error::NeedsConsent(consent.message())),
+            Some(confirm) => {
+                if !confirm(&consent) {
+                    return Err(Error::Refused(format!(
+                        "update of {id} declined; current version kept"
+                    )));
+                }
+            }
+        }
+
+        let artifact = std::fs::canonicalize(&p.plan.artifact.path).at(&p.plan.artifact.path)?;
+        let locked = self.lock_unchanged(app)?;
+        // `versions` is newest first; the new version takes the first slot.
+        let pruned: Vec<&str> = locked
+            .versions
+            .iter()
+            .skip(KEEP_VERSIONS - 1)
+            .filter(|v| v.label != label)
+            .map(|v| v.label.as_str())
+            .collect();
+        let record = NativeRecord {
+            name: p.plan.name.clone(),
+            format: app.format.as_str().into(),
+            source_kind: app.source.kind.as_str().into(),
+            source_location: app.source.location.clone(),
+            source_pattern: app.source.pattern.clone(),
+            label: label.clone(),
+            version: p.plan.payload.version.clone(),
+            marker: p.marker.clone(),
+            entry: native_entry(&p.plan.payload, p.plan.entry.as_ref()),
+            options: Vec::new(),
+        };
+        self.apply_native(NativeOp::Update, id, &artifact, &consent, record, &pruned)?;
+        Ok(Some(label))
     }
 
     pub(super) fn remove_native(&mut self, app: &AppRecord) -> Result<()> {

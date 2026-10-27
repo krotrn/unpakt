@@ -110,6 +110,16 @@ pub struct AddOpts {
     pub extract: bool,
 }
 
+/// Options for [`Engine::update_opts`].
+#[derive(Default)]
+pub struct UpdateOpts<'a> {
+    /// Accepts compatibility problems the installed version had not accepted.
+    pub allow_risky: bool,
+    /// Asked before a native update with the new version's consent. `None`
+    /// refuses native updates with `NeedsConsent`.
+    pub confirm_native: Option<&'a mut dyn FnMut(&NativeConsent) -> bool>,
+}
+
 /// The backend id of apps installed through the system package manager.
 pub const NATIVE_BACKEND: &str = "packagekit";
 
@@ -1052,6 +1062,19 @@ impl Engine {
     /// Like [`Engine::update`]. With `allow_risky`, compatibility problems the
     /// installed version had not accepted are accepted too.
     pub fn update_with(&mut self, id: &str, allow_risky: bool) -> Result<Option<String>> {
+        self.update_opts(
+            id,
+            UpdateOpts {
+                allow_risky,
+                confirm_native: None,
+            },
+        )
+    }
+
+    /// Like [`Engine::update_with`], and able to update a system-wide app once
+    /// `opts.confirm_native` agrees to it.
+    pub fn update_opts(&mut self, id: &str, opts: UpdateOpts<'_>) -> Result<Option<String>> {
+        let allow_risky = opts.allow_risky;
         let (app, versions, _) = self.get(id)?;
         if app.source.kind == SourceKind::LocalFile {
             return Err(Error::Unsupported(format!(
@@ -1059,6 +1082,9 @@ impl Engine {
             )));
         }
         let current = self.current_version(&app)?;
+        if app.backend == NATIVE_BACKEND {
+            return self.update_native(&app, &current, opts);
+        }
         let release = for_kind(app.source.kind).latest(&app.source, &self.http)?;
         let newer = newer_release(&app, &current, &release);
         if app.source.kind == SourceKind::Github && newer.is_none() {
@@ -1103,7 +1129,7 @@ impl Engine {
             pattern,
             format: Some(app.format),
             allow_risky: false,
-            extract: false,
+            extract: true,
         };
         let mut p = self.inspect(&app.source.location, opts)?;
         let _download = self.download_guard(&p.plan.artifact.path);

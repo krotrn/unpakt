@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use common::fake_pk::FakePk;
 use unpakt_core::cancel::Cancel;
-use unpakt_core::engine::{AddOpts, Engine, Route};
+use unpakt_core::engine::{AddOpts, Engine, Route, UpdateOpts};
 use unpakt_core::host::Host;
 use unpakt_core::http::Http;
 use unpakt_core::manifest::Manifest;
@@ -76,8 +76,12 @@ fn default_engine_has_no_packagekit() {
 }
 
 fn hello_deb(dir: &Path, postinst: Option<&str>) -> std::path::PathBuf {
+    hello_deb_at(dir, "1.0", postinst)
+}
+
+fn hello_deb_at(dir: &Path, version: &str, postinst: Option<&str>) -> std::path::PathBuf {
     let control = format!(
-        "Package: hello\nVersion: 1.0\nArchitecture: {}\nMaintainer: t <t@example.org>\n",
+        "Package: hello\nVersion: {version}\nArchitecture: {}\nMaintainer: t <t@example.org>\n",
         common::host_package_arch()
     );
     let scripts: Vec<(&str, &[u8])> = postinst
@@ -86,7 +90,7 @@ fn hello_deb(dir: &Path, postinst: Option<&str>) -> std::path::PathBuf {
         .collect();
     common::build_deb(
         dir,
-        "hello_1.0.deb",
+        &format!("hello_{version}.deb"),
         &control,
         &scripts,
         &[
@@ -736,4 +740,271 @@ fn remove_native_resolve_failure_keeps_record() {
     assert!(engine.get("hello").is_ok());
     assert_eq!(journals(engine.layout()), 0);
     assert!(removes(&pk).is_empty());
+}
+
+fn publish_hello(forge: &common::MockForge, tag: &str, version: &str) {
+    let src = tempfile::tempdir().unwrap();
+    let deb = hello_deb_at(src.path(), version, None);
+    forge.publish(
+        tag,
+        vec![(format!("hello_{version}.deb"), std::fs::read(&deb).unwrap())],
+    );
+}
+
+/// A native `hello` 1.0 installed from the forge's first release.
+fn forge_hello(root: &Path, pk: &FakePk, forge: &common::MockForge) -> Engine {
+    publish_hello(forge, "1.0", "1.0");
+    let mut engine = native_engine(root, pk).with_http(Http::new(&forge.api_url(), None).unwrap());
+    let mut plan = engine
+        .inspect("https://github.com/o/r", AddOpts::default())
+        .unwrap();
+    plan.native_consent = true;
+    engine.install(plan).unwrap();
+    engine
+}
+
+fn current_version(engine: &Engine) -> Option<String> {
+    let (app, versions, _) = engine.get("hello").unwrap();
+    versions
+        .into_iter()
+        .find(|v| v.label == app.current)
+        .unwrap()
+        .version
+}
+
+fn package_id(root: &Path) -> Option<String> {
+    let manifest = Manifest::open(&Layout::under(root).db).unwrap();
+    manifest.option("hello", "pk.package_id").unwrap()
+}
+
+#[test]
+fn native_update_asks_and_installs() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    pk.0.lock().unwrap().next_install = PkPackage::parse("hello;2.0;amd64;local");
+
+    let mut asked = Vec::new();
+    let mut confirm = |c: &unpakt_core::engine::NativeConsent| {
+        asked.push(c.clone());
+        true
+    };
+    let label = engine
+        .update_opts(
+            "hello",
+            UpdateOpts {
+                allow_risky: false,
+                confirm_native: Some(&mut confirm),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].version, "2.0");
+    assert_eq!(installs(&pk), 2);
+    let (app, _, _) = engine.get("hello").unwrap();
+    assert_eq!(app.current, label);
+    assert_eq!(app.backend, "packagekit");
+    assert_eq!(current_version(&engine).as_deref(), Some("2.0"));
+    assert_eq!(
+        package_id(root.path()).as_deref(),
+        Some("hello;2.0;amd64;local")
+    );
+    assert_eq!(journals(engine.layout()), 0);
+}
+
+#[test]
+fn native_update_without_confirm_needs_consent() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    pk.0.lock().unwrap().next_install = PkPackage::parse("hello;2.0;amd64;local");
+    assert!(matches!(
+        engine.update_with("hello", false),
+        Err(Error::NeedsConsent(_))
+    ));
+    assert_eq!(current_version(&engine).as_deref(), Some("1.0"));
+    assert_eq!(installs(&pk), 1);
+}
+
+#[test]
+fn native_update_declined_keeps_current() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    let mut confirm = |_: &unpakt_core::engine::NativeConsent| false;
+    match engine.update_opts(
+        "hello",
+        UpdateOpts {
+            allow_risky: false,
+            confirm_native: Some(&mut confirm),
+        },
+    ) {
+        Err(Error::Refused(m)) => assert!(m.contains("declined"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(current_version(&engine).as_deref(), Some("1.0"));
+    assert_eq!(installs(&pk), 1);
+}
+
+#[test]
+fn system_newer_records_and_skips() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    pk.0.lock().unwrap().installed.insert(
+        "hello".into(),
+        PkPackage::parse("hello;2.1;amd64;local").unwrap(),
+    );
+    let mut ran = false;
+    let mut confirm = |_: &unpakt_core::engine::NativeConsent| {
+        ran = true;
+        true
+    };
+    let result = engine
+        .update_opts(
+            "hello",
+            UpdateOpts {
+                allow_risky: false,
+                confirm_native: Some(&mut confirm),
+            },
+        )
+        .unwrap();
+    assert_eq!(result, None);
+    assert!(!ran);
+    assert_eq!(installs(&pk), 1);
+    assert_eq!(current_version(&engine).as_deref(), Some("2.1"));
+    assert_eq!(
+        package_id(root.path()).as_deref(),
+        Some("hello;2.1;amd64;local")
+    );
+    assert!(
+        engine
+            .check_updates(Some("hello"))
+            .unwrap()
+            .updates
+            .is_empty()
+    );
+}
+
+#[test]
+fn system_epoch_newer_skips() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    pk.0.lock().unwrap().installed.insert(
+        "hello".into(),
+        PkPackage::parse("hello;1:1.5;amd64;local").unwrap(),
+    );
+    assert_eq!(engine.update_with("hello", false).unwrap(), None);
+    assert_eq!(installs(&pk), 1);
+}
+
+#[test]
+fn native_package_gone_is_not_reinstalled() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    pk.0.lock().unwrap().installed.clear();
+    match engine.update_with("hello", false) {
+        Err(Error::NotFound(m)) => assert!(m.contains("unpakt remove hello"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(installs(&pk), 1);
+}
+
+#[test]
+fn native_update_without_packagekit_keeps_current() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let engine = forge_hello(root.path(), &pk, &forge);
+    publish_hello(&forge, "v2.0", "2.0");
+    let mut engine = engine.with_packagekit(Box::new(unpakt_core::packagekit::Unavailable));
+    match engine.update_with("hello", false) {
+        Err(Error::PackageKitUnavailable(m)) => assert!(m.contains("not available now"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(current_version(&engine).as_deref(), Some("1.0"));
+}
+
+#[test]
+fn extract_app_stays_extract_when_packagekit_appears() {
+    let forge = common::MockForge::start();
+    let src = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (name, deb) = common::deb_with_elf(src.path(), "1.0.0", &[], &[], false);
+    forge.publish("1.0.0", vec![(name, std::fs::read(&deb).unwrap())]);
+    let off = FakePk::default();
+    let mut engine =
+        native_engine(root.path(), &off).with_http(Http::new(&forge.api_url(), None).unwrap());
+    let plan = engine
+        .inspect("https://github.com/o/r", AddOpts::default())
+        .unwrap();
+    assert_eq!(plan.route(), Some(Route::Extract));
+    engine.install(plan).unwrap();
+    drop(engine);
+
+    let (name, deb) = common::deb_with_elf(src.path(), "2.0.0", &[], &[], false);
+    forge.publish("v2.0.0", vec![(name, std::fs::read(&deb).unwrap())]);
+    let on = hello_fake();
+    let mut engine =
+        native_engine(root.path(), &on).with_http(Http::new(&forge.api_url(), None).unwrap());
+    assert!(engine.update_with("foo", false).unwrap().is_some());
+    assert_eq!(engine.get("foo").unwrap().0.backend, "extract");
+    assert_eq!(installs(&on), 0);
+}
+
+#[test]
+fn interrupted_native_update_is_recorded_on_next_run() {
+    let forge = common::MockForge::start();
+    let root = tempfile::tempdir().unwrap();
+    let pk = hello_fake();
+    let mut engine = forge_hello(root.path(), &pk, &forge);
+    for (tag, version) in [("v2.0", "2.0"), ("v3.0", "3.0"), ("v4.0", "4.0")] {
+        publish_hello(&forge, tag, version);
+        {
+            let mut state = pk.0.lock().unwrap();
+            state.next_install = PkPackage::parse(&format!("hello;{version};amd64;local"));
+            // The update looks the package up first, then again after installing.
+            state.fail_resolve_once = version == "4.0";
+            state.resolves_before_fail = 1;
+        }
+        let mut confirm = |_: &unpakt_core::engine::NativeConsent| true;
+        let result = engine.update_opts(
+            "hello",
+            UpdateOpts {
+                allow_risky: false,
+                confirm_native: Some(&mut confirm),
+            },
+        );
+        if version == "4.0" {
+            assert!(matches!(result, Err(Error::PackageKit(_))), "{result:?}");
+        } else {
+            result.unwrap();
+        }
+    }
+    assert_eq!(current_version(&engine).as_deref(), Some("3.0"));
+    assert_eq!(journals(engine.layout()), 1);
+
+    let recovered = engine.recover().unwrap();
+    assert_eq!(recovered.native, 1);
+    assert_eq!(current_version(&engine).as_deref(), Some("4.0"));
+    assert_eq!(journals(engine.layout()), 0);
+    let (app, versions, _) = engine.get("hello").unwrap();
+    assert_eq!(app.current, "4.0");
+    assert_eq!(versions.len(), unpakt_core::engine::KEEP_VERSIONS);
+    assert!(versions.iter().all(|v| v.label != "1.0"));
 }

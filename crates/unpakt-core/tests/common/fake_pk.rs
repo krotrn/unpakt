@@ -17,6 +17,8 @@ pub struct FakeState {
     pub fail_install: Option<fn() -> Error>,
     pub fail_remove: Option<fn() -> Error>,
     pub fail_resolve_once: bool,
+    /// Resolves answered normally before `fail_resolve_once` takes effect.
+    pub resolves_before_fail: usize,
     pub panic_on_probe: bool,
 }
 
@@ -53,7 +55,9 @@ impl PackageKit for FakePk {
     fn resolve_installed(&self, name: &str) -> Result<Option<PkPackage>> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("resolve {name}"));
-        if std::mem::take(&mut state.fail_resolve_once) {
+        if state.resolves_before_fail > 0 {
+            state.resolves_before_fail -= 1;
+        } else if std::mem::take(&mut state.fail_resolve_once) {
             return Err(Error::PackageKit("resolve failed".into()));
         }
         Ok(state.installed.get(name).cloned())

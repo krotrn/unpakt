@@ -76,7 +76,7 @@ what the install scripts would have done.
 | --- | --- | --- |
 | AppImage | file, URL, GitHub release | Run in place, or extracted where FUSE 2 is missing |
 | Tarball (`.tar.gz`, `.tar.xz`, `.tar.zst`, …) | file, URL, GitHub release | Unpacked; the program and icon are found for you |
-| `.deb`, `.rpm`, pacman (`.pkg.tar.zst`) | file, URL, GitHub release | Unpacked into your home after the compatibility check, scripts never run; or, for your distribution's own package format, installed system-wide through PackageKit after you agree (see [Native installs](#native-installs)) |
+| `.deb`, `.rpm`, pacman (`.pkg.tar.zst`) | file, URL, GitHub release | Unpacked into your home after the compatibility check, scripts never run; or, for a `.deb` or `.rpm` of your distribution's own family, installed system-wide through PackageKit after you agree (see [Native installs](#native-installs)); pacman packages are always unpacked |
 
 Given a GitHub repository, unpakt prefers an AppImage, then a tarball, then a
 package for your distribution. `--format` picks one explicitly.
@@ -89,8 +89,8 @@ package for your distribution. `--format` picks one explicitly.
   `rollback` goes back one version (the last three versions are kept).
 - Transactional installs, updates and removals, with crash recovery.
 - Per user by default: no root, nothing written outside your home directory.
-  System-wide installs only happen for a package of your distribution's own
-  format, through PackageKit, and only after you agree.
+  System-wide installs only happen for a `.deb` or `.rpm` of your
+  distribution's own family, through PackageKit, and only after you agree.
 - `doctor` checks the installation for problems.
 - Shell completion for bash, zsh and fish (and elvish, PowerShell).
 - A desktop app with the same install, update, rollback and remove actions,
@@ -329,13 +329,17 @@ tar.gz works, because its launcher also looks next to itself.
 Where a package goes depends on its format and your system:
 
 - An AppImage or tarball goes into your user directory.
-- A `.deb`, `.rpm` or pacman package of your own distribution's family, with
-  PackageKit available, is installed system-wide through PackageKit after you
-  agree. The package's install scripts run as root, so unpakt asks first.
+- A `.deb` or `.rpm` of your own distribution's family, with PackageKit
+  available, is installed system-wide through PackageKit after you agree. The
+  package's install scripts run as root, so unpakt asks first.
+- A pacman package is always extracted into your user directory, because
+  PackageKit cannot install local pacman packages. unpakt prints the
+  `sudo pacman -U` command so you can install it system-wide yourself.
 - Any other package goes into your user directory if the compatibility check
   passes, and is refused otherwise.
 - On an image-based (immutable) system, or without PackageKit, a package of
-  your own family is extracted into your user directory instead.
+  your own family is extracted into your user directory instead, and unpakt
+  prints the command that installs it natively.
 
 unpakt never runs `apt`, `dnf`, `pacman`, `sudo` or `pkexec`, and never sees
 your password: PackageKit and polkit ask you themselves.
@@ -470,7 +474,9 @@ own apps. Everything unpakt writes is under `~/.local` and `~/.cache`.
 **Is installing a `.deb` with unpakt the same as `apt install`?** It depends on
 the route. On a Debian-family system with PackageKit, after you agree, unpakt
 hands the package to PackageKit (see [Native installs](#native-installs));
-`--extract` opts out. Everywhere else unpakt unpacks the package's files into your home directory, rewrites its links to
+`--extract` opts out. Everywhere else (and always for pacman packages) unpakt unpacks
+the package's files into your home directory, prints the command that installs
+a package of your own family natively, rewrites its links to
 point there, and never runs its install scripts or resolves its dependencies.
 That suits self-contained apps, which is most vendor packages (VS Code, Slack,
 Obsidian and the like). A package that needs a system service, a new user

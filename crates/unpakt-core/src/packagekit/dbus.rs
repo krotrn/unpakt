@@ -1,4 +1,9 @@
 //! PackageKit over the system D-Bus.
+//!
+//! Every bus call times out after `QUERY_TIMEOUT`. PackageKit's transaction
+//! methods return once the transaction is queued; polkit prompts and progress
+//! arrive afterwards as signals, so an install or removal has no overall
+//! deadline and a query (`Resolve`) does.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use futures_lite::StreamExt;
 use zbus::MessageStream;
+use zbus::blocking::connection::Builder;
 use zbus::blocking::fdo::DBusProxy;
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::Type;
@@ -162,7 +168,12 @@ fn next_message(
 }
 
 fn bus_error(e: zbus::Error) -> Error {
-    Error::PackageKit(e.to_string())
+    match e {
+        zbus::Error::InputOutput(ref io) if io.kind() == std::io::ErrorKind::TimedOut => {
+            Error::PackageKit("PackageKit did not answer".into())
+        }
+        e => Error::PackageKit(e.to_string()),
+    }
 }
 
 /// PackageKit reached through the system bus. The connection opens on first
@@ -183,9 +194,11 @@ impl Dbus {
         if let Some(conn) = slot.as_ref() {
             return Ok(conn.clone());
         }
-        let conn = Connection::system().map_err(|e| {
-            Error::PackageKitUnavailable(format!("the system bus is not reachable: {e}"))
-        })?;
+        let conn = Builder::system()
+            .and_then(|b| b.method_timeout(QUERY_TIMEOUT).build())
+            .map_err(|e| {
+                Error::PackageKitUnavailable(format!("the system bus is not reachable: {e}"))
+            })?;
         *slot = Some(conn.clone());
         Ok(conn)
     }
@@ -249,8 +262,9 @@ impl Dbus {
         let mut packages = Vec::new();
         let mut cancel_sent = false;
         let started = Instant::now();
-        // Installs and removals have no overall deadline: a polkit prompt may
-        // wait on the user as long as it takes, and cancelling is the way out
+        // Installs and removals have no overall deadline: the calls above
+        // return once the transaction is queued, and a polkit prompt may then
+        // wait on the user as long as it takes. Cancelling is the way out
         // until changes start.
         loop {
             if timed_out(started, limit, Instant::now()) {
@@ -316,7 +330,7 @@ impl PackageKit for Dbus {
                 return false;
             }
         };
-        // The bus calls have no timeout of their own.
+        // Bounds the probe as a whole; each of its calls also times out.
         let (send, recv) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = send.send(Dbus::probe(conn));
@@ -384,6 +398,22 @@ mod tests {
         assert!(!timed_out(start, limit, start + Duration::from_secs(29)));
         assert!(timed_out(start, limit, start + Duration::from_secs(30)));
         assert!(!timed_out(start, None, start + Duration::from_secs(86_400)));
+    }
+
+    #[test]
+    fn timed_out_call_is_not_an_answer() {
+        let timeout = zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::from(
+            std::io::ErrorKind::TimedOut,
+        )));
+        assert_eq!(
+            bus_error(timeout).to_string(),
+            "package manager error: PackageKit did not answer"
+        );
+        assert!(
+            bus_error(zbus::Error::Failure("boom".into()))
+                .to_string()
+                .contains("boom")
+        );
     }
 
     #[test]

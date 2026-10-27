@@ -1,6 +1,8 @@
 //! PackageKit over the system D-Bus.
 //!
-//! Every method call is bounded by `QUERY_TIMEOUT`. The connection handshake
+//! zbus is async, and each bus operation here runs to its end on the calling
+//! thread under `zbus::block_on`, so the client stays blocking. Every method
+//! call is bounded by `QUERY_TIMEOUT`. The connection handshake
 //! has no timeout of its own and is bounded only in the capability probe,
 //! which runs on its own thread. PackageKit's transaction methods return once
 //! the transaction is queued; polkit prompts and progress arrive afterwards as
@@ -15,13 +17,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_lite::StreamExt;
-use zbus::MessageStream;
-use zbus::blocking::connection::Builder;
-use zbus::blocking::fdo::DBusProxy;
-use zbus::blocking::{Connection, MessageIterator, Proxy};
+use zbus::connection::Builder;
 use zbus::message::Type;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
-use zbus::{MatchRule, Message};
+use zbus::{
+    Connection, DynamicType, MatchRule, Message, MessageStream, ObjectPath, OwnedObjectPath,
+    OwnedVariant,
+};
 
 use super::{PackageKit, PkEvent, PkPackage};
 use crate::cancel::Cancel;
@@ -30,6 +31,9 @@ use crate::error::{Error, Result};
 const SERVICE: &str = "org.freedesktop.PackageKit";
 const SERVICE_PATH: &str = "/org/freedesktop/PackageKit";
 const TRANSACTION_IFACE: &str = "org.freedesktop.PackageKit.Transaction";
+const BUS_SERVICE: &str = "org.freedesktop.DBus";
+const BUS_PATH: &str = "/org/freedesktop/DBus";
+const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 
 // The wire values of PackageKit 1.2.x to 1.4.x: each enum counts up from zero
 // in the order of lib/pk-enum.h (PkRoleEnum, PkStatusEnum, PkExitEnum,
@@ -136,7 +140,7 @@ fn signal_of(msg: &Message) -> Option<Vec<Signal>> {
             Some(vec![Signal::Finished(exit)])
         }
         "PropertiesChanged" => {
-            let (iface, changed, _): (String, HashMap<String, OwnedValue>, Vec<String>) =
+            let (iface, changed, _): (String, HashMap<String, OwnedVariant>, Vec<String>) =
                 body.deserialize().ok()?;
             if iface != TRANSACTION_IFACE {
                 return None;
@@ -163,13 +167,55 @@ fn next_message(
     stream: &mut MessageStream,
     wait: Duration,
 ) -> Option<Option<zbus::Result<Message>>> {
-    async_io::block_on(futures_lite::future::or(
-        async { Some(stream.next().await) },
-        async {
-            async_io::Timer::after(wait).await;
-            None
-        },
-    ))
+    zbus::block_on(async {
+        // Inside `block_on` this is the runtime the thread is driving, so its
+        // timer runs here.
+        match zruntime::SharedRuntime::current() {
+            Ok(runtime) => runtime.timeout(wait, stream.next()).await.ok(),
+            Err(e) => Some(Some(Err(e.into()))),
+        }
+    })
+}
+
+/// Calls `method` of `iface` at `path` on `service` and waits for the reply,
+/// which the connection's method timeout bounds.
+fn call<'p, P, R, B>(
+    conn: &Connection,
+    service: &str,
+    path: P,
+    iface: &str,
+    method: &str,
+    body: &B,
+) -> zbus::Result<R>
+where
+    P: TryInto<ObjectPath<'p>>,
+    P::Error: Into<zbus::Error>,
+    R: for<'d> zbus::wire::DynamicDeserialize<'d>,
+    B: serde::Serialize + DynamicType,
+{
+    let reply = zbus::block_on(conn.call_method(Some(service), path, Some(iface), method, body))?;
+    reply.body().deserialize()
+}
+
+/// Calls `method` on the transaction at `path`, which returns nothing.
+fn tx_call<B>(conn: &Connection, path: &OwnedObjectPath, method: &str, body: &B) -> zbus::Result<()>
+where
+    B: serde::Serialize + DynamicType,
+{
+    call(
+        conn,
+        SERVICE,
+        path.as_ref(),
+        TRANSACTION_IFACE,
+        method,
+        body,
+    )
+}
+
+/// Whether `e` is an error reply. zbus 6 reports a reply named in
+/// `org.freedesktop.DBus.Error` as `FDO` and any other as `MethodError`.
+fn is_error_reply(e: &zbus::Error) -> bool {
+    matches!(e, zbus::Error::MethodError(..) | zbus::Error::FDO(_))
 }
 
 /// Whether a PackageKit method changes the installed packages.
@@ -211,9 +257,8 @@ fn open(slot: &Mutex<Option<Connection>>) -> Result<Connection> {
     if let Some(conn) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         return Ok(conn.clone());
     }
-    let conn = Builder::system()
-        .and_then(|b| b.method_timeout(QUERY_TIMEOUT).build())
-        .map_err(|e| {
+    let conn =
+        zbus::block_on(Builder::system().method_timeout(QUERY_TIMEOUT).build()).map_err(|e| {
             Error::PackageKitUnavailable(format!("the system bus is not reachable: {e}"))
         })?;
     let mut kept = slot.lock().unwrap_or_else(|e| e.into_inner());
@@ -232,18 +277,35 @@ impl Dbus {
     }
 
     fn probe(conn: Connection) -> zbus::Result<bool> {
-        let bus = DBusProxy::new(&conn)?;
-        let name = zbus::names::BusName::try_from(SERVICE)?;
-        let present = bus.name_has_owner(name)?
-            || bus
-                .list_activatable_names()?
-                .iter()
-                .any(|n| n.as_str() == SERVICE);
+        let present = call::<_, bool, _>(
+            &conn,
+            BUS_SERVICE,
+            BUS_PATH,
+            BUS_SERVICE,
+            "NameHasOwner",
+            &(SERVICE,),
+        )? || call::<_, Vec<String>, _>(
+            &conn,
+            BUS_SERVICE,
+            BUS_PATH,
+            BUS_SERVICE,
+            "ListActivatableNames",
+            &(),
+        )?
+        .iter()
+        .any(|n| n == SERVICE);
         if !present {
             return Ok(false);
         }
-        let main = Proxy::new(&conn, SERVICE, SERVICE_PATH, SERVICE)?;
-        let roles: u64 = main.get_property("Roles")?;
+        let roles: OwnedVariant = call(
+            &conn,
+            SERVICE,
+            SERVICE_PATH,
+            PROPERTIES_IFACE,
+            "Get",
+            &(SERVICE, "Roles"),
+        )?;
+        let roles = u64::try_from(&roles)?;
         Ok(has_role(roles, ROLE_INSTALL_FILES))
     }
 
@@ -260,30 +322,37 @@ impl Dbus {
         on: &mut dyn FnMut(PkEvent),
     ) -> Result<Vec<String>>
     where
-        B: serde::Serialize + zbus::zvariant::DynamicType,
+        B: serde::Serialize + DynamicType,
     {
         let conn = self.connection()?;
-        let main = Proxy::new(&conn, SERVICE, SERVICE_PATH, SERVICE).map_err(bus_error)?;
-        let path: OwnedObjectPath = main.call("CreateTransaction", &()).map_err(|e| match e {
-            zbus::Error::MethodError(..) => Error::PackageKitUnavailable(e.to_string()),
-            other => bus_error(other),
+        let path: OwnedObjectPath = call(
+            &conn,
+            SERVICE,
+            SERVICE_PATH,
+            SERVICE,
+            "CreateTransaction",
+            &(),
+        )
+        .map_err(|e| {
+            if is_error_reply(&e) {
+                Error::PackageKitUnavailable(e.to_string())
+            } else {
+                bus_error(e)
+            }
         })?;
-        let tx = Proxy::new(&conn, SERVICE, path.as_ref(), TRANSACTION_IFACE).map_err(bus_error)?;
-        tx.call::<_, _, ()>("SetHints", &(vec!["interactive=true"],))
-            .map_err(bus_error)?;
+        tx_call(&conn, &path, "SetHints", &(vec!["interactive=true"],)).map_err(bus_error)?;
 
-        // Listen before the call so that no signal is missed.
+        // Listen before the call so that no signal is missed: the stream is
+        // returned only once the bus has answered `AddMatch`.
         let rule = MatchRule::builder()
             .msg_type(Type::Signal)
             .path(path.as_ref())
-            .map_err(bus_error)?
-            .build();
-        let mut messages = MessageIterator::for_match_rule(rule, &conn, None)
-            .map_err(bus_error)?
-            .into_inner();
+            .build()
+            .map_err(bus_error)?;
+        let mut messages =
+            zbus::block_on(MessageStream::for_match_rule(rule, &conn, None)).map_err(bus_error)?;
 
-        tx.call::<_, _, ()>(method, body)
-            .map_err(|e| call_error(e, changes_system(method)))?;
+        tx_call(&conn, &path, method, body).map_err(|e| call_error(e, changes_system(method)))?;
 
         let (mut status, mut percentage) = (STATUS_UNKNOWN, 101);
         let mut last_event = None;
@@ -336,7 +405,7 @@ impl Dbus {
             last_event = event;
             if !cancel_sent && before_changes(status) && cancel.is_cancelled() {
                 cancel_sent = true;
-                if let Err(e) = tx.call::<_, _, ()>("Cancel", &()) {
+                if let Err(e) = tx_call(&conn, &path, "Cancel", &()) {
                     tracing::debug!("cancelling the PackageKit transaction failed: {e}");
                 }
             }

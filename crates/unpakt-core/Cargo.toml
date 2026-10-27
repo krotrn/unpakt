@@ -13,7 +13,6 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-async-io = "2.6.0"
 backhand = "0.25.5"
 bzip2 = "0.6.1"
 dirs = "7.0.0"
@@ -35,7 +34,9 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 tracing = "0.1.44"
 url = "2.5.8"
-zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+# Async zbus on its own zruntime, driven by a blocking `block_on`: no tokio, so the core stays blocking and musl-static.
+zbus = { version = "6.1.0", default-features = false, features = ["default-rt"] }
+zruntime = { version = "0.2.1", default-features = false, features = ["helper"] }
 zstd = "0.14.3"
 
 [dev-dependencies]

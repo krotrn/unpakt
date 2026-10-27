@@ -308,6 +308,7 @@ impl Model {
     pub fn on_event(&mut self, e: &Event) -> Effect {
         if let Event::Progress(progress) = e {
             if let Busy::Working {
+                op,
                 label,
                 fraction: share,
                 waiting,
@@ -332,7 +333,11 @@ impl Model {
                     Progress::WaitingForAuthorization => "Waiting for authorization…".into(),
                     Progress::SystemChange { percent } => {
                         *share = percent.map(|p| f64::from(p.min(100)) / 100.0);
-                        "Installing with the system package manager…".into()
+                        if *op == Op::Remove {
+                            "Removing with the system package manager…".into()
+                        } else {
+                            "Installing with the system package manager…".into()
+                        }
                     }
                 };
             }
@@ -897,6 +902,23 @@ mod tests {
         assert!(matches!(
             &m.busy,
             Busy::Working { fraction: Some(f), .. } if (*f - 0.3).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn system_change_label_names_removal() {
+        let mut m = Model::default();
+        m.start(Op::Remove);
+        m.on_event(&Event::Progress(Progress::SystemChange { percent: None }));
+        assert!(matches!(
+            &m.busy,
+            Busy::Working { label, .. } if label == "Removing with the system package manager…"
+        ));
+        m.start(Op::Install);
+        m.on_event(&Event::Progress(Progress::SystemChange { percent: None }));
+        assert!(matches!(
+            &m.busy,
+            Busy::Working { label, .. } if label == "Installing with the system package manager…"
         ));
     }
 

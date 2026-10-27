@@ -697,3 +697,65 @@ fn add_risky_deb_is_refused_and_installs_nothing() {
     let list = run(tmp.path(), &["list"]);
     assert!(!stdout(&list).contains("riskyfoo"), "{}", stdout(&list));
 }
+
+#[test]
+fn extract_flag_is_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let out = run(
+        tmp.path(),
+        &["add", "--extract", "--yes", tarball.to_str().unwrap()],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}
+
+#[test]
+fn update_yes_flag_is_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run(tmp.path(), &["update", "--yes"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("no apps installed"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn forget_refuses_extract_apps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tarball = fixture_tarball(tmp.path());
+    let add = run(tmp.path(), &["add", "--yes", tarball.to_str().unwrap()]);
+    assert_eq!(add.status.code(), Some(0), "{}", stderr(&add));
+    let id = stdout(&run(tmp.path(), &["list"]))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let out = run(tmp.path(), &["remove", "--forget", "--yes", &id]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("use `unpakt remove"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(stdout(&run(tmp.path(), &["list"])).contains(&id));
+}
+
+#[test]
+fn same_family_deb_without_packagekit_says_why() {
+    use unpakt_core::host::Host;
+    use unpakt_core::model::PackageFamily;
+    if Host::detect().family() != Some(PackageFamily::Deb) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let deb = risky_deb(tmp.path());
+    let out = run(tmp.path(), &["inspect", deb.to_str().unwrap()]);
+    assert!(
+        stdout(&out).contains("(PackageKit is not available)"),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+}

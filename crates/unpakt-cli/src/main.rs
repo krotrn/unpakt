@@ -12,7 +12,7 @@ use output::clean_lines;
 use tracing_subscriber::EnvFilter;
 use unpakt_core::Error;
 use unpakt_core::cancel::Cancel;
-use unpakt_core::engine::{AddOpts, Engine};
+use unpakt_core::engine::{AddOpts, Engine, NATIVE_BACKEND, NativeConsent, Route, UpdateOpts};
 use unpakt_core::model::{FormatKind, SourceKind};
 use unpakt_core::progress::Progress;
 
@@ -38,7 +38,7 @@ struct Cli {
 enum Command {
     /// Install a package file, a direct download URL or a GitHub repo
     #[command(
-        after_long_help = "Exit status 2 means unpakt refused: a compatibility problem or a declined confirmation."
+        after_long_help = "Exit status 2 means unpakt refused: a compatibility problem or a declined confirmation.\n\nOn a native install, --yes also agrees to run the package's install scripts as root."
     )]
     Add {
         input: String,
@@ -75,6 +75,9 @@ enum Command {
         /// Install a package even when it may not run on this machine
         #[arg(long)]
         allow_risky: bool,
+        /// Install into your user directory even when the system package manager could install it
+        #[arg(long)]
+        extract: bool,
     },
     /// Show what installing a package would do
     Inspect { input: String },
@@ -88,6 +91,9 @@ enum Command {
         /// Remove without asking for confirmation
         #[arg(long)]
         yes: bool,
+        /// Only drop unpakt's record of a system-wide app; the package stays installed
+        #[arg(long)]
+        forget: bool,
     },
     /// Update apps to their latest release
     Update {
@@ -99,6 +105,9 @@ enum Command {
         /// Update even when the new version may not run on this machine
         #[arg(long)]
         allow_risky: bool,
+        /// Install native updates without asking
+        #[arg(long)]
+        yes: bool,
     },
     /// Switch an app back to its previous version
     Rollback { id: String },
@@ -229,6 +238,7 @@ fn run(command: Command) -> Result<()> {
             pattern,
             format,
             allow_risky,
+            extract,
         } => {
             let desktop = match (desktop, no_desktop) {
                 (true, _) => Some(true),
@@ -245,18 +255,25 @@ fn run(command: Command) -> Result<()> {
                 pattern,
                 format,
                 allow_risky,
-                extract: false,
+                extract,
             };
-            let plan = engine.inspect(&input, opts)?;
+            let mut plan = engine.inspect(&input, opts)?;
             output::print_summary(&plan);
             if let Some(error) = refusal_with_alternative(&plan) {
                 engine.discard(plan);
                 return Err(error.into());
             }
-            if !yes && let Err(e) = confirm("install", "Install?") {
+            let native = plan.route() == Some(Route::Native);
+            let question = if native {
+                "Install system-wide?"
+            } else {
+                "Install?"
+            };
+            if !yes && let Err(e) = confirm("install", question) {
                 engine.discard(plan);
                 return Err(e);
             }
+            plan.native_consent = native;
             let _armed = interrupt.arm();
             let app = engine.install(plan)?;
             println!("installed {} {}", app.id, app.current);
@@ -271,10 +288,28 @@ fn run(command: Command) -> Result<()> {
             let (app, versions, files) = engine.get(&id)?;
             output::print_info(&app, &versions, &files);
         }
-        Command::Remove { id, yes } => {
-            engine.get(&id)?;
+        Command::Remove { id, yes, forget } => {
+            let native = engine.get(&id)?.0.backend == NATIVE_BACKEND;
+            if forget {
+                // An extract app is refused by the engine; no point asking first.
+                if native && !yes {
+                    confirm(
+                        "forget",
+                        &format!("Forget {id}? The package stays installed."),
+                    )?;
+                }
+                let _armed = interrupt.arm();
+                engine.forget(&id)?;
+                println!("forgot {id}");
+                return Ok(());
+            }
             if !yes {
-                confirm("remove", &format!("Remove {id}?"))?;
+                let question = if native {
+                    format!("Remove {id} from the system?")
+                } else {
+                    format!("Remove {id}?")
+                };
+                confirm("remove", &question)?;
             }
             let _armed = interrupt.arm();
             engine.remove(&id)?;
@@ -284,6 +319,7 @@ fn run(command: Command) -> Result<()> {
             id,
             check,
             allow_risky,
+            yes,
         } => {
             if check {
                 let checkable = match id.as_deref() {
@@ -315,7 +351,7 @@ fn run(command: Command) -> Result<()> {
                 }
                 report_failed_checks(&found.failed)?;
             } else {
-                update_apps(&mut engine, &interrupt, id.as_deref(), allow_risky)?;
+                update_apps(&mut engine, &interrupt, id.as_deref(), allow_risky, yes)?;
             }
         }
         Command::Rollback { id } => {
@@ -344,11 +380,23 @@ fn update_apps(
     interrupt: &Interrupt,
     id: Option<&str>,
     allow_risky: bool,
+    yes: bool,
 ) -> Result<()> {
+    let mut confirmer = native_confirmer(yes);
     if let Some(id) = id {
         let old = engine.get(id)?.0.current;
         let _armed = interrupt.arm();
-        report_update(id, &old, engine.update_with(id, allow_risky)?);
+        let opts = UpdateOpts {
+            allow_risky,
+            confirm_native: confirmer
+                .as_mut()
+                .map(|c| &mut **c as &mut dyn FnMut(&NativeConsent) -> bool),
+        };
+        report_update(id, &old, engine.update_opts(id, opts)?);
+        return Ok(());
+    }
+    if engine.list()?.is_empty() {
+        println!("no apps installed");
         return Ok(());
     }
     let check = engine.check_updates(None)?;
@@ -368,12 +416,24 @@ fn update_apps(
         };
         let outcome = {
             let _armed = interrupt.arm();
-            engine.update_with(&app.id, allow_risky)
+            let opts = UpdateOpts {
+                allow_risky,
+                confirm_native: confirmer
+                    .as_mut()
+                    .map(|c| &mut **c as &mut dyn FnMut(&NativeConsent) -> bool),
+            };
+            engine.update_opts(&app.id, opts)
         };
         match outcome {
             Ok(new) => report_update(&app.id, &info.current, new),
+            Err(Error::PackageKitUnavailable(_)) => {
+                println!("{}: skipped (PackageKit is not available)", app.id);
+            }
             Err(e) => {
-                refused |= matches!(e, Error::Refused(_) | Error::NeedsAcceptance(_));
+                refused |= matches!(
+                    e,
+                    Error::Refused(_) | Error::NeedsAcceptance(_) | Error::NeedsConsent(_)
+                );
                 note_update_failure(&app.id, e, &mut failed)?
             }
         }
@@ -382,6 +442,26 @@ fn update_apps(
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+type NativeConfirmer = Box<dyn FnMut(&NativeConsent) -> bool>;
+
+/// How a native update gets its consent: `--yes` agrees after showing what
+/// runs, a terminal asks, and without either the engine refuses.
+fn native_confirmer(yes: bool) -> Option<NativeConfirmer> {
+    if yes {
+        return Some(Box::new(|consent| {
+            eprintln!("{}", clean_lines(&consent.message()));
+            true
+        }));
+    }
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    Some(Box::new(|consent| {
+        eprintln!("{}", clean_lines(&consent.message()));
+        confirm("update", "Update system-wide?").is_ok()
+    }))
 }
 
 /// The plan's refusal, with the release's portable alternative named the way
@@ -434,6 +514,9 @@ fn note_update_failure(id: &str, e: Error, failed: &mut usize) -> Result<()> {
     eprintln!("error: {id}: {}", clean_lines(&format!("{e:#}")));
     if matches!(e, Error::NeedsAcceptance(_)) {
         eprintln!("  run `unpakt update {id} --allow-risky` to accept them");
+    }
+    if matches!(e, Error::NeedsConsent(_)) {
+        eprintln!("  run `unpakt update {id} --yes` to accept it");
     }
     *failed += 1;
     Ok(())

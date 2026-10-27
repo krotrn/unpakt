@@ -1,5 +1,5 @@
 use unpakt_core::compat::Verdict;
-use unpakt_core::engine::{Check, InstallPlan, UpdateInfo};
+use unpakt_core::engine::{Check, InstallPlan, Route, UpdateInfo};
 use unpakt_core::manifest::{AppRecord, FileRecord, VersionRecord};
 
 const RUNNER_UPS: usize = 3;
@@ -68,14 +68,35 @@ pub fn summary_lines(p: &InstallPlan) -> Vec<String> {
         "desktop: {}",
         if p.want_desktop { "yes" } else { "no" }
     ));
+    out.extend(route_line(p.route(), p.native_skipped.as_deref()));
+    // The consent text already carries the compatibility verdict.
+    let consent = p.consent();
+    if let Some(consent) = &consent {
+        out.extend(consent.message().lines().map(str::to_string));
+    }
     out.extend(
         plan.payload
             .warnings
             .iter()
             .map(|w| format!("warning: {w}")),
     );
-    out.extend(compat_lines(p.compat.as_ref(), p.native_hint.as_deref()));
+    if consent.is_none() {
+        out.extend(compat_lines(p.compat.as_ref(), p.native_hint.as_deref()));
+    }
     out.iter().map(|line| clean(line)).collect()
+}
+
+/// How the package will be installed, and why not system-wide when it could
+/// have been.
+fn route_line(route: Option<Route>, skipped: Option<&str>) -> Option<String> {
+    Some(match route? {
+        Route::Native => "route:   install system-wide via PackageKit".to_string(),
+        Route::Extract => match skipped {
+            Some(why) => format!("route:   extract to your user directory ({why})"),
+            None => "route:   extract to your user directory".to_string(),
+        },
+        Route::Refused => "route:   refused".to_string(),
+    })
 }
 
 fn compat_lines(compat: Option<&Verdict>, native_hint: Option<&str>) -> Vec<String> {
@@ -144,8 +165,9 @@ pub fn print_updates(updates: &[UpdateInfo]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean, clean_lines, compat_lines, version_text};
+    use super::{clean, clean_lines, compat_lines, route_line, version_text};
     use unpakt_core::compat::{Finding, Verdict};
+    use unpakt_core::engine::Route;
 
     fn finding(tag: &'static str, detail: &str, note: bool) -> Finding {
         Finding {
@@ -223,5 +245,26 @@ mod tests {
             clean_lines("refused\n  - bad\x1b[2Jdetail"),
             "refused\n  - bad\u{FFFD}[2Jdetail"
         );
+    }
+
+    #[test]
+    fn route_line_cases() {
+        assert_eq!(
+            route_line(Some(Route::Native), None).as_deref(),
+            Some("route:   install system-wide via PackageKit")
+        );
+        assert_eq!(
+            route_line(Some(Route::Extract), None).as_deref(),
+            Some("route:   extract to your user directory")
+        );
+        assert_eq!(
+            route_line(Some(Route::Extract), Some("PackageKit is not available")).as_deref(),
+            Some("route:   extract to your user directory (PackageKit is not available)")
+        );
+        assert_eq!(
+            route_line(Some(Route::Refused), None).as_deref(),
+            Some("route:   refused")
+        );
+        assert_eq!(route_line(None, None), None);
     }
 }

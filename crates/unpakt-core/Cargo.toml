@@ -36,6 +36,7 @@ tracing = "0.1.44"
 url = "2.5.8"
 # Async zbus on its own zruntime, driven by a blocking `block_on`: no tokio, so the core stays blocking and musl-static.
 zbus = { version = "6.1.0", default-features = false, features = ["default-rt"] }
+# Must stay on the zruntime line zbus uses: SharedRuntime::current() has to see zbus's runtime.
 zruntime = { version = "0.2.1", default-features = false, features = ["helper"] }
 zstd = "0.14.3"
 

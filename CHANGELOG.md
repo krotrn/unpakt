@@ -38,6 +38,13 @@ All notable changes to this project are documented here. The format follows
   other refusals.
 - Updated dependencies, including zbus 6 and rusqlite 0.41 (SQLite 3.54.1).
 
+### Security
+
+- AppImages compressed with zstd are now decoded with zstd 0.14.3, which fixes
+  RUSTSEC-2026-0391, RUSTSEC-2026-0398 and RUSTSEC-2026-0403 (and the related
+  unsoundness advisories) in the zstd 0.13 previously pulled in through
+  backhand.
+
 ## [0.2.0] - 2026-10-25
 
 ### Added

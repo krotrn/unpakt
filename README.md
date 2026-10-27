@@ -1,8 +1,8 @@
 # unpakt
 
 **Install any Linux app for your user: AppImages, tarballs, and `.deb`, `.rpm`
-or pacman packages. No root, no vendor install scripts, and a one-step
-rollback when an update breaks something.**
+or pacman packages. For your user by default, with no root and no vendor
+install scripts, and a one-step rollback when an update breaks something.**
 
 [![CI](https://github.com/krotrn/unpakt/actions/workflows/ci.yml/badge.svg)](https://github.com/krotrn/unpakt/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/krotrn/unpakt)](https://github.com/krotrn/unpakt/releases/latest)
@@ -29,6 +29,9 @@ terminal (`unpakt`) or from the GTK 4 / libadwaita app (`unpakt-gui`).
 - **You'd rather not run a vendor's install scripts as root.** unpakt never
   asks for root and never runs a package's install scripts. It reads them, and
   tells you if they would have set up accounts, services or kernel modules.
+  The one exception is a package for your own distribution's family, where you
+  can let your package manager install it instead; see
+  [Native installs](#native-installs).
 - **Your AppImages live in `~/Downloads`, with no menu entry and no updates.**
   unpakt gives each app a launcher entry with its icon, a command, and updates
   when you ask for them.
@@ -73,7 +76,7 @@ what the install scripts would have done.
 | --- | --- | --- |
 | AppImage | file, URL, GitHub release | Run in place, or extracted where FUSE 2 is missing |
 | Tarball (`.tar.gz`, `.tar.xz`, `.tar.zst`, …) | file, URL, GitHub release | Unpacked; the program and icon are found for you |
-| `.deb`, `.rpm`, pacman (`.pkg.tar.zst`) | file, URL, GitHub release | Unpacked into your home after the compatibility check; scripts never run |
+| `.deb`, `.rpm`, pacman (`.pkg.tar.zst`) | file, URL, GitHub release | Unpacked into your home after the compatibility check, scripts never run; or, for your distribution's own package format, installed system-wide through PackageKit after you agree (see [Native installs](#native-installs)) |
 
 Given a GitHub repository, unpakt prefers an AppImage, then a tarball, then a
 package for your distribution. `--format` picks one explicitly.
@@ -85,11 +88,14 @@ package for your distribution. `--format` picks one explicitly.
 - `update` fetches the latest release and keeps the format you installed;
   `rollback` goes back one version (the last three versions are kept).
 - Transactional installs, updates and removals, with crash recovery.
-- Per user only: no root, nothing written outside your home directory.
+- Per user by default: no root, nothing written outside your home directory.
+  System-wide installs only happen for a package of your distribution's own
+  format, through PackageKit, and only after you agree.
 - `doctor` checks the installation for problems.
 - Shell completion for bash, zsh and fish (and elvish, PowerShell).
 - A desktop app with the same install, update, rollback and remove actions,
-  including the compatibility verdict and its confirmations.
+  including the compatibility verdict and its confirmations, and a consent
+  dialog for native installs with an "Install for me only" choice.
 
 ## Install
 
@@ -318,7 +324,52 @@ such a package comes out risky with the path named. When the vendor also offers
 a tarball, install that instead: Discord's deb is refused this way, while its
 tar.gz works, because its launcher also looks next to itself.
 
-Installing system-wide, through the package manager, comes in a later release.
+### Native installs
+
+Where a package goes depends on its format and your system:
+
+- An AppImage or tarball goes into your user directory.
+- A `.deb`, `.rpm` or pacman package of your own distribution's family, with
+  PackageKit available, is installed system-wide through PackageKit after you
+  agree. The package's install scripts run as root, so unpakt asks first.
+- Any other package goes into your user directory if the compatibility check
+  passes, and is refused otherwise.
+- On an image-based (immutable) system, or without PackageKit, a package of
+  your own family is extracted into your user directory instead.
+
+unpakt never runs `apt`, `dnf`, `pacman`, `sudo` or `pkexec`, and never sees
+your password: PackageKit and polkit ask you themselves.
+
+```sh
+unpakt add ~/Downloads/app_1.2.3_amd64.deb             # asks, then installs system-wide
+unpakt add --extract ~/Downloads/app_1.2.3_amd64.deb   # your user directory instead
+unpakt update --yes                                    # install native updates without asking
+unpakt remove --forget <id>                            # drop unpakt's record only
+```
+
+- `add --extract` installs into your user directory even when the system
+  package manager could install the package.
+- `add --yes` skips the question; on a native install it also agrees to run
+  the install scripts as root. Without `--yes` and without a terminal, the
+  install is refused (exit status 2).
+- `update` asks for consent again for each native update; `update --yes`
+  installs them without asking.
+- `remove --forget` only drops unpakt's record of a system-wide app. The
+  package stays installed.
+
+Native apps differ from the ones in your home directory:
+
+- There is no rollback. Remove them with your package manager; `unpakt remove`
+  asks the package manager through PackageKit.
+- An app keeps the route it was installed with. An app extracted into your
+  user directory keeps updating that way, even after PackageKit is installed.
+- If the system already has the same or a newer version, unpakt records it and
+  skips the install.
+- If the package was removed outside unpakt, `update` refuses, and
+  `unpakt remove` forgets the app.
+
+Exit status is 2 when a command is refused (including missing consent) and 1
+on an error.
 
 ### Where files go
 
@@ -412,12 +463,14 @@ pacman packages. A `.zip` or a bare executable is refused.
 
 ## FAQ
 
-**Why per user, with no root?** Installing into your home directory needs no
-privileges, cannot break the system's packages, and lets each user have their
+**Why per user, with no root?** By default, installing into your home
+directory needs no privileges, cannot break the system's packages, and lets each user have their
 own apps. Everything unpakt writes is under `~/.local` and `~/.cache`.
 
-**Is installing a `.deb` with unpakt the same as `apt install`?** No. unpakt
-unpacks the package's files into your home directory, rewrites its links to
+**Is installing a `.deb` with unpakt the same as `apt install`?** It depends on
+the route. On a Debian-family system with PackageKit, after you agree, unpakt
+hands the package to PackageKit (see [Native installs](#native-installs));
+`--extract` opts out. Everywhere else unpakt unpacks the package's files into your home directory, rewrites its links to
 point there, and never runs its install scripts or resolves its dependencies.
 That suits self-contained apps, which is most vendor packages (VS Code, Slack,
 Obsidian and the like). A package that needs a system service, a new user
@@ -490,9 +543,10 @@ then a release has no `SHA256SUMS.minisig`.
 
 - unpakt does not verify checksums or signatures of the apps it installs yet.
 - unpakt does not check for updates in the background yet; run `unpakt update`.
-- Packages are unpacked, not installed through your package manager: their
-  dependencies are not installed and their install scripts never run. Apps
-  that need either are flagged by the compatibility check.
+- Packages extracted into your user directory are unpacked, not installed
+  through your package manager: their dependencies are not installed and their
+  install scripts never run. Apps that need either are flagged by the
+  compatibility check. Native installs have no rollback.
 - Some vendors ship a `.deb` that is only a launcher looking for files under
   `/usr/share` or `/opt`; use their tarball instead (see
   [Compatibility check](#compatibility-check)).
